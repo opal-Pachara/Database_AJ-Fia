@@ -64,6 +64,7 @@ export interface AdminUserItem {
   id: number;
   userId: string;
   fullName: string;
+  lineAliases?: string;
   role: 'USER' | 'ADMIN';
   status: 'ACTIVE' | 'INACTIVE' | 'SUSPENDED';
   mustChangePassword: boolean;

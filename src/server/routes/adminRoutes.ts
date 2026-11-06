@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { Router, Request, Response } from 'express';
 import { getDb, runInTransaction } from '../db/connection.js';
 import { appConfig } from '../config.js';
@@ -13,6 +14,8 @@ import {
   performSystemBackup,
   restoreSystemFromBackup,
 } from '../services/backupService.js';
+import { createNotificationsForIncomingItem } from '../services/notificationService.js';
+import { broadcastRealtimeEvent } from '../services/realtimeEvents.js';
 import { writeSystemLog } from '../utils/logger.js';
 
 export const adminRouter = Router();
@@ -32,6 +35,7 @@ adminRouter.get('/users', (_req: Request, res: Response) => {
         u.id,
         u.user_id AS userId,
         u.full_name AS fullName,
+        COALESCE(u.line_aliases, '') AS lineAliases,
         u.role,
         u.status,
         u.must_change_password AS mustChangePassword,
@@ -68,6 +72,7 @@ adminRouter.post('/users', async (req: Request, res: Response) => {
     const admin = req.authUser!;
     const userId = String(req.body?.userId || '').trim();
     const fullName = String(req.body?.fullName || '').trim();
+    const lineAliases = String(req.body?.lineAliases || '').trim();
     const customPassword = String(req.body?.password || '').trim();
     const status = String(req.body?.status || 'ACTIVE').toUpperCase();
 
@@ -102,10 +107,10 @@ adminRouter.post('/users', async (req: Request, res: Response) => {
     const insertRes = db
       .prepare(
         `INSERT INTO users (
-          user_id, full_name, password_hash, role, status, must_change_password, created_at, updated_at
-        ) VALUES (?, ?, ?, 'USER', ?, 1, datetime('now'), datetime('now'))`
+          user_id, full_name, line_aliases, password_hash, role, status, must_change_password, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'USER', ?, 1, datetime('now'), datetime('now'))`
       )
-      .run(userId, fullName, passwordHash, status);
+      .run(userId, fullName, lineAliases, passwordHash, status);
 
     const newUserPk = Number(insertRes.lastInsertRowid);
 
@@ -127,7 +132,7 @@ adminRouter.post('/users', async (req: Request, res: Response) => {
       action: 'USER_CREATED',
       actorUserId: admin.userId,
       ipAddress: req.ip,
-      details: { targetUserId: userId, fullName, status },
+      details: { targetUserId: userId, fullName, lineAliases, status },
     });
 
     res.status(201).json({
@@ -135,6 +140,7 @@ adminRouter.post('/users', async (req: Request, res: Response) => {
         id: newUserPk,
         userId,
         fullName,
+        lineAliases,
         role: 'USER',
         status,
         mustChangePassword: true,
@@ -155,14 +161,16 @@ adminRouter.put('/users/:id', async (req: Request, res: Response) => {
     const admin = req.authUser!;
     const targetPk = Number(req.params.id);
     const fullName = String(req.body?.fullName || '').trim();
+    const lineAliases =
+      req.body?.lineAliases !== undefined ? String(req.body.lineAliases).trim() : undefined;
     const newPassword = String(req.body?.password || '').trim();
     const status = String(req.body?.status || '').toUpperCase();
 
     const db = getDb();
     const targetUser = db
-      .prepare('SELECT id, user_id, role, status FROM users WHERE id = ?')
+      .prepare('SELECT id, user_id, role, status, COALESCE(line_aliases, \'\') AS line_aliases FROM users WHERE id = ?')
       .get(targetPk) as
-      | { id: number; user_id: string; role: 'USER' | 'ADMIN'; status: string }
+      | { id: number; user_id: string; role: 'USER' | 'ADMIN'; status: string; line_aliases: string }
       | undefined;
 
     if (!targetUser) {
@@ -178,6 +186,7 @@ adminRouter.put('/users/:id', async (req: Request, res: Response) => {
     const finalStatus = ['ACTIVE', 'INACTIVE', 'SUSPENDED'].includes(status)
       ? status
       : targetUser.status;
+    const finalAliases = lineAliases !== undefined ? lineAliases : targetUser.line_aliases;
 
     if (targetUser.id === admin.id && finalStatus !== 'ACTIVE') {
       res.status(400).json({ error: 'ไม่สามารถระงับหรือปิดใช้งานบัญชี Admin ของตนเองได้' });
@@ -191,6 +200,7 @@ adminRouter.put('/users/:id', async (req: Request, res: Response) => {
       db.prepare(
         `UPDATE users
          SET full_name = ?,
+             line_aliases = ?,
              password_hash = ?,
              status = ?,
              must_change_password = ?,
@@ -198,17 +208,18 @@ adminRouter.put('/users/:id', async (req: Request, res: Response) => {
              locked_until = NULL,
              updated_at = datetime('now')
          WHERE id = ?`
-      ).run(fullName, passwordHash, finalStatus, mustChange, targetPk);
+      ).run(fullName, finalAliases, passwordHash, finalStatus, mustChange, targetPk);
     } else {
       db.prepare(
         `UPDATE users
          SET full_name = ?,
+             line_aliases = ?,
              status = ?,
              failed_login_attempts = CASE WHEN ? = 'ACTIVE' THEN 0 ELSE failed_login_attempts END,
              locked_until = CASE WHEN ? = 'ACTIVE' THEN NULL ELSE locked_until END,
              updated_at = datetime('now')
          WHERE id = ?`
-      ).run(fullName, finalStatus, finalStatus, finalStatus, targetPk);
+      ).run(fullName, finalAliases, finalStatus, finalStatus, finalStatus, targetPk);
     }
 
     if (finalStatus !== 'ACTIVE') {
@@ -229,7 +240,16 @@ adminRouter.put('/users/:id', async (req: Request, res: Response) => {
       },
     });
 
-    res.json({ ok: true });
+    res.json({
+      ok: true,
+      user: {
+        id: targetPk,
+        userId: targetUser.user_id,
+        fullName,
+        lineAliases: finalAliases,
+        status: finalStatus,
+      },
+    });
   } catch (err) {
     console.error('Update user error:', err);
     res.status(500).json({ error: 'เกิดข้อผิดพลาดในการแก้ไขข้อมูลผู้ใช้งาน' });
@@ -422,7 +442,343 @@ adminRouter.delete('/files/:fileUuid', (req: Request, res: Response) => {
     details: { fileUuid, originalName: fileRow.original_name },
   });
 
+  broadcastRealtimeEvent({
+    type: 'FILE_DELETED',
+    itemUuid: fileUuid,
+    title: fileRow.original_name,
+    visibility: 'PUBLIC',
+    recipientUserIds: [],
+    timestamp: new Date().toISOString(),
+  });
+
   res.json({ ok: true });
+});
+
+/**
+ * POST /api/admin/files/bulk-delete
+ * ลบไฟล์แบบเลือกหลายรายการพร้อมกัน (Multi-select) หรือลบไฟล์ทั้งหมดในระบบ (Delete All)
+ */
+adminRouter.post('/files/bulk-delete', (req: Request, res: Response) => {
+  const admin = req.authUser!;
+  const deleteAll = Boolean(req.body?.deleteAll);
+  const rawUuids = Array.isArray(req.body?.fileUuids) ? req.body.fileUuids : [];
+  const fileUuids: string[] = Array.from(
+    new Set<string>(rawUuids.map((u: unknown) => String(u || '').trim()).filter(Boolean))
+  );
+
+  const db = getDb();
+
+  let targetRows: Array<{
+    id: number;
+    file_uuid: string;
+    original_name: string;
+    relative_storage_path: string;
+  }> = [];
+
+  if (deleteAll) {
+    targetRows = db
+      .prepare(
+        `SELECT id, file_uuid, original_name, relative_storage_path
+         FROM files
+         WHERE status = 'ACTIVE'`
+      )
+      .all() as unknown as typeof targetRows;
+  } else {
+    if (fileUuids.length === 0) {
+      res.status(400).json({ error: 'กรุณาเลือกไฟล์ที่ต้องการลบอย่างน้อย 1 รายการ' });
+      return;
+    }
+    const placeholders = fileUuids.map(() => '?').join(', ');
+    targetRows = db
+      .prepare(
+        `SELECT id, file_uuid, original_name, relative_storage_path
+         FROM files
+         WHERE status = 'ACTIVE' AND file_uuid IN (${placeholders})`
+      )
+      .all(...fileUuids) as unknown as typeof targetRows;
+  }
+
+  if (targetRows.length === 0) {
+    res.status(404).json({ error: 'ไม่พบรายการไฟล์ที่ต้องการลบ' });
+    return;
+  }
+
+  for (const row of targetRows) {
+    try {
+      const absPath = resolveSafeStoragePath(appConfig.paths.storage, row.relative_storage_path);
+      if (fs.existsSync(absPath)) {
+        fs.unlinkSync(absPath);
+      }
+    } catch {
+      // Ignore physical unlink error if already missing
+    }
+  }
+
+  runInTransaction(db, () => {
+    const updateStmt = db.prepare(`UPDATE files SET status = 'DELETED' WHERE id = ?`);
+    const deleteNotifStmt = db.prepare(`DELETE FROM notifications WHERE file_pk = ?`);
+    for (const row of targetRows) {
+      updateStmt.run(row.id);
+      deleteNotifStmt.run(row.id);
+    }
+  });
+
+  writeSystemLog({
+    level: 'INFO',
+    category: 'ADMIN',
+    action: deleteAll ? 'ALL_FILES_DELETED_BY_ADMIN' : 'FILES_BULK_DELETED_BY_ADMIN',
+    actorUserId: admin.userId,
+    ipAddress: req.ip,
+    details: {
+      deleteAll,
+      deletedCount: targetRows.length,
+      deletedUuids: targetRows.map((r) => r.file_uuid),
+      deletedNames: targetRows.map((r) => r.original_name),
+    },
+  });
+
+  broadcastRealtimeEvent({
+    type: 'FILE_DELETED',
+    itemUuid: targetRows[0]?.file_uuid || 'BULK_DELETE',
+    title: `ลบไฟล์ ${targetRows.length} รายการ`,
+    visibility: 'PUBLIC',
+    recipientUserIds: [],
+    timestamp: new Date().toISOString(),
+  });
+
+  res.json({
+    ok: true,
+    deletedCount: targetRows.length,
+    message: `ลบไฟล์สำเร็จทั้งหมด ${targetRows.length} รายการ`,
+  });
+});
+
+/**
+ * PATCH /api/admin/files/:fileUuid/recipient
+ * ให้ Admin สามารถกำหนดหรือเปลี่ยนผู้รับไฟล์ย้อนหลังผ่านหน้าเว็บได้ (เช่น ย้ายจาก Public ไปเป็น Private ของผู้ใช้ที่ต้องการ)
+ */
+adminRouter.patch('/files/:fileUuid/recipient', (req: Request, res: Response) => {
+  const admin = req.authUser!;
+  const fileUuid = String(req.params.fileUuid || '').trim();
+  const targetUserId = String(req.body?.recipientUserId || '').trim();
+  const db = getDb();
+
+  const fileRow = db
+    .prepare(
+      `SELECT id, file_uuid, original_name, stored_filename, relative_storage_path,
+              file_category, file_size_bytes, attached_message, visibility, received_at
+       FROM files
+       WHERE file_uuid = ? AND status = 'ACTIVE'`
+    )
+    .get(fileUuid) as
+    | {
+        id: number;
+        file_uuid: string;
+        original_name: string;
+        stored_filename: string;
+        relative_storage_path: string;
+        file_category: string;
+        file_size_bytes: number;
+        attached_message: string | null;
+        visibility: 'PRIVATE' | 'PUBLIC';
+        received_at: string;
+      }
+    | undefined;
+
+  if (!fileRow) {
+    res.status(404).json({ error: 'ไม่พบไฟล์ที่ต้องการเปลี่ยนผู้รับ' });
+    return;
+  }
+
+  // Case 1: Set to PUBLIC
+  if (!targetUserId || targetUserId.toUpperCase() === 'PUBLIC') {
+    const currentAbsPath = resolveSafeStoragePath(
+      appConfig.paths.storage,
+      fileRow.relative_storage_path
+    );
+    const newAbsPath = resolveSafeStoragePath(
+      appConfig.paths.publicStorage,
+      fileRow.stored_filename
+    );
+    if (fs.existsSync(currentAbsPath) && currentAbsPath !== newAbsPath) {
+      fs.renameSync(currentAbsPath, newAbsPath);
+    }
+    const newRelPath = path.posix.join('public', fileRow.stored_filename);
+
+    runInTransaction(db, () => {
+      db.prepare(
+        `UPDATE files SET visibility = 'PUBLIC', relative_storage_path = ? WHERE id = ?`
+      ).run(newRelPath, fileRow.id);
+      db.prepare(`DELETE FROM file_recipients WHERE file_pk = ?`).run(fileRow.id);
+    });
+
+    broadcastRealtimeEvent({
+      type: 'FILE_UPDATED',
+      itemUuid: fileRow.file_uuid,
+      title: fileRow.original_name,
+      fileCategory: fileRow.file_category,
+      fileSizeBytes: fileRow.file_size_bytes,
+      visibility: 'PUBLIC',
+      recipientUserIds: [],
+      attachedMessage: fileRow.attached_message,
+      timestamp: new Date().toISOString(),
+    });
+
+    res.json({
+      ok: true,
+      visibility: 'PUBLIC',
+      recipientUserIds: null,
+      message: `เปลี่ยนสถานะไฟล์ "${fileRow.original_name}" เป็น Public (ส่วนกลาง) เรียบร้อยแล้ว`,
+    });
+    return;
+  }
+
+  // Case 2: Set to PRIVATE for a specific user
+  const userRow = db
+    .prepare(`SELECT id, user_id, full_name FROM users WHERE user_id = ?`)
+    .get(targetUserId) as { id: number; user_id: string; full_name: string } | undefined;
+
+  if (!userRow) {
+    res.status(404).json({ error: `ไม่พบบัญชีผู้ใช้งานรหัส "${targetUserId}"` });
+    return;
+  }
+
+  const currentAbsPath = resolveSafeStoragePath(
+    appConfig.paths.storage,
+    fileRow.relative_storage_path
+  );
+  const userFolder = sanitizeUserFolderId(userRow.user_id);
+  const userPrivateDir = resolveSafeStoragePath(appConfig.paths.privateStorage, userFolder);
+  if (!fs.existsSync(userPrivateDir)) {
+    fs.mkdirSync(userPrivateDir, { recursive: true });
+  }
+  const newAbsPath = resolveSafeStoragePath(userPrivateDir, fileRow.stored_filename);
+  if (fs.existsSync(currentAbsPath) && currentAbsPath !== newAbsPath) {
+    fs.renameSync(currentAbsPath, newAbsPath);
+  }
+  const newRelPath = path.posix.join('private', userFolder, fileRow.stored_filename);
+
+  runInTransaction(db, () => {
+    db.prepare(
+      `UPDATE files SET visibility = 'PRIVATE', relative_storage_path = ? WHERE id = ?`
+    ).run(newRelPath, fileRow.id);
+    db.prepare(`DELETE FROM file_recipients WHERE file_pk = ?`).run(fileRow.id);
+    db.prepare(
+      `INSERT INTO file_recipients (file_pk, user_pk, recipient_user_id, assigned_at)
+       VALUES (?, ?, ?, datetime('now'))`
+    ).run(fileRow.id, userRow.id, userRow.user_id);
+
+    createNotificationsForIncomingItem(db, {
+      itemType: 'FILE',
+      filePk: fileRow.id,
+      itemUuid: fileRow.file_uuid,
+      title: fileRow.original_name,
+      detailMessage: fileRow.attached_message,
+      fileType: fileRow.file_category,
+      fileSizeBytes: fileRow.file_size_bytes,
+      visibility: 'PRIVATE',
+      recipients: [
+        {
+          userPk: userRow.id,
+          userId: userRow.user_id,
+          fullName: userRow.full_name,
+        },
+      ],
+      receivedAt: new Date().toISOString(),
+      eventBatchHint: `ADMIN_REASSIGN_${fileRow.file_uuid}`,
+    });
+  });
+
+  writeSystemLog({
+    level: 'INFO',
+    category: 'ADMIN',
+    action: 'FILE_RECIPIENT_ASSIGNED_BY_ADMIN',
+    actorUserId: admin.userId,
+    ipAddress: req.ip,
+    details: {
+      fileUuid,
+      originalName: fileRow.original_name,
+      recipientUserId: userRow.user_id,
+    },
+  });
+
+  broadcastRealtimeEvent({
+    type: 'FILE_UPDATED',
+    itemUuid: fileRow.file_uuid,
+    title: fileRow.original_name,
+    fileCategory: fileRow.file_category,
+    fileSizeBytes: fileRow.file_size_bytes,
+    visibility: 'PRIVATE',
+    recipientUserIds: [userRow.user_id],
+    attachedMessage: fileRow.attached_message,
+    timestamp: new Date().toISOString(),
+  });
+
+  res.json({
+    ok: true,
+    visibility: 'PRIVATE',
+    recipientUserIds: userRow.user_id,
+    message: `กำหนดผู้รับไฟล์ "${fileRow.original_name}" เป็น Private (${userRow.user_id} - ${userRow.full_name}) เรียบร้อยแล้ว`,
+  });
+});
+
+/**
+ * PATCH /api/admin/files/:fileUuid/comment
+ * ให้ Admin สามารถแก้ไขข้อความที่ฝากถึงผู้รับ (Comment) ของไฟล์ได้ผ่านหน้าเว็บ
+ */
+adminRouter.patch('/files/:fileUuid/comment', (req: Request, res: Response) => {
+  const admin = req.authUser!;
+  const fileUuid = String(req.params.fileUuid || '').trim();
+  const rawComment = req.body?.comment;
+  const newComment =
+    typeof rawComment === 'string' && rawComment.trim().length > 0 ? rawComment.trim() : null;
+  const db = getDb();
+
+  const fileRow = db
+    .prepare(`SELECT id, original_name FROM files WHERE file_uuid = ? AND status = 'ACTIVE'`)
+    .get(fileUuid) as { id: number; original_name: string } | undefined;
+
+  if (!fileRow) {
+    res.status(404).json({ error: 'ไม่พบไฟล์ที่ต้องการแก้ไขข้อความฝาก' });
+    return;
+  }
+
+  runInTransaction(db, () => {
+    db.prepare(`UPDATE files SET attached_message = ? WHERE id = ?`).run(newComment, fileRow.id);
+    db.prepare(`UPDATE notifications SET detail_message = ? WHERE file_pk = ?`).run(
+      newComment,
+      fileRow.id
+    );
+  });
+
+  writeSystemLog({
+    level: 'INFO',
+    category: 'ADMIN',
+    action: 'FILE_COMMENT_UPDATED_BY_ADMIN',
+    actorUserId: admin.userId,
+    ipAddress: req.ip,
+    details: {
+      fileUuid,
+      originalName: fileRow.original_name,
+      comment: newComment,
+    },
+  });
+
+  broadcastRealtimeEvent({
+    type: 'FILE_UPDATED',
+    itemUuid: fileUuid,
+    title: fileRow.original_name,
+    visibility: 'PUBLIC',
+    recipientUserIds: [],
+    attachedMessage: newComment,
+    timestamp: new Date().toISOString(),
+  });
+
+  res.json({
+    ok: true,
+    attachedMessage: newComment,
+    message: `บันทึกข้อความที่ฝาก (Comment) ของไฟล์ "${fileRow.original_name}" เรียบร้อยแล้ว`,
+  });
 });
 
 /**

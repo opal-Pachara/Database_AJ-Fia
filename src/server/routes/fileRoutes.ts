@@ -132,7 +132,20 @@ fileRouter.get('/', requireAuth(), (req: Request, res: Response) => {
       f.attached_message AS attachedMessage,
       f.visibility AS visibility,
       f.is_previewable AS isPreviewable,
-      f.received_at AS receivedAt
+      f.received_at AS receivedAt,
+      (
+        SELECT GROUP_CONCAT(
+          CASE
+            WHEN u.line_aliases IS NOT NULL AND u.line_aliases != '' THEN u.line_aliases || ' (' || u.full_name || ')'
+            WHEN u.full_name IS NOT NULL AND u.full_name != '' THEN u.full_name
+            ELSE fr.recipient_user_id
+          END,
+          ', '
+        )
+        FROM file_recipients fr
+        LEFT JOIN users u ON u.id = fr.user_pk
+        WHERE fr.file_pk = f.id
+      ) AS recipientUserIds
     FROM files f
     WHERE ${conditions.join(' AND ')}
     ORDER BY f.received_at DESC, f.id DESC
@@ -149,6 +162,7 @@ fileRouter.get('/', requireAuth(), (req: Request, res: Response) => {
     visibility: 'PRIVATE' | 'PUBLIC';
     isPreviewable: number;
     receivedAt: string;
+    recipientUserIds: string | null;
   }>;
 
   // Compute summary stats for User Dashboard (Section 10.2)
@@ -306,8 +320,12 @@ fileRouter.get('/:fileUuid/preview', requireAuth(), (req: Request, res: Response
     return;
   }
 
-  // REQ-15: ต้องไม่บังคับให้ Browser แสดงไฟล์ที่ไม่รองรับ (รองรับเฉพาะ PDF และรูปภาพ)
-  if (fileRow.is_previewable !== 1 || !['PDF', 'IMAGE'].includes(fileRow.file_category)) {
+  // รองรับการแสดงตัวอย่าง (Preview) สำหรับ PDF, รูปภาพ (IMAGE), วิดีโอ (VIDEO), และไฟล์เสียง (AUDIO)
+  // ส่วนไฟล์ประเภท DOCUMENT (.docx/.xlsx), ARCHIVE (.zip) ที่เบราว์เซอร์ไม่รองรับจะคืนค่า 415
+  if (
+    fileRow.is_previewable !== 1 ||
+    !['PDF', 'IMAGE', 'VIDEO', 'AUDIO'].includes(fileRow.file_category)
+  ) {
     res.status(415).json({
       error: 'ไฟล์ประเภทนี้ไม่รองรับการแสดงตัวอย่าง (Preview) กรุณากดดาวน์โหลดแทน',
     });
@@ -321,16 +339,69 @@ fileRouter.get('/:fileUuid/preview', requireAuth(), (req: Request, res: Response
       return;
     }
 
-    const contentType =
-      fileRow.file_category === 'PDF' ? 'application/pdf' : fileRow.mime_type;
+    const stat = fs.statSync(absPath);
+    const totalSize = stat.size;
 
-    res.setHeader('Content-Type', contentType);
-    res.setHeader('Content-Length', String(fileRow.file_size_bytes));
+    let contentType = fileRow.mime_type || 'application/octet-stream';
+    if (fileRow.file_category === 'PDF') contentType = 'application/pdf';
+    else if (
+      fileRow.file_category === 'IMAGE' &&
+      (!contentType.startsWith('image/') || contentType === 'application/octet-stream')
+    ) {
+      contentType =
+        fileRow.file_extension === 'png'
+          ? 'image/png'
+          : fileRow.file_extension === 'gif'
+          ? 'image/gif'
+          : fileRow.file_extension === 'webp'
+          ? 'image/webp'
+          : 'image/jpeg';
+    } else if (
+      fileRow.file_category === 'VIDEO' &&
+      (!contentType.startsWith('video/') || contentType === 'application/octet-stream')
+    ) {
+      contentType = fileRow.file_extension === 'mov' ? 'video/quicktime' : 'video/mp4';
+    } else if (
+      fileRow.file_category === 'AUDIO' &&
+      (!contentType.startsWith('audio/') || contentType === 'application/octet-stream')
+    ) {
+      contentType = fileRow.file_extension === 'mp3' ? 'audio/mpeg' : 'audio/mp4';
+    }
+
+    res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader(
       'Content-Disposition',
       `inline; filename*=UTF-8''${encodeURIComponent(fileRow.original_name)}`
     );
     res.setHeader('X-Content-Type-Options', 'nosniff');
+
+    // Support HTTP Byte-Range Requests (206 Partial Content) required by iPhone / iPad Safari for Video, Audio, and PDF streaming
+    const rangeHeader = req.headers.range;
+    if (rangeHeader && totalSize > 0) {
+      const parts = rangeHeader.replace(/bytes=/, '').split('-');
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : totalSize - 1;
+
+      if (isNaN(start) || isNaN(end) || start >= totalSize || end >= totalSize || start > end) {
+        res.status(416);
+        res.setHeader('Content-Range', `bytes */${totalSize}`);
+        res.end();
+        return;
+      }
+
+      const chunkSize = end - start + 1;
+      res.status(206);
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${totalSize}`);
+      res.setHeader('Content-Length', String(chunkSize));
+      res.setHeader('Content-Type', contentType);
+
+      const stream = fs.createReadStream(absPath, { start, end });
+      stream.pipe(res);
+      return;
+    }
+
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Length', String(totalSize));
 
     const stream = fs.createReadStream(absPath);
     stream.pipe(res);

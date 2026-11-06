@@ -24,6 +24,7 @@ export function createApp(): Express {
           scriptSrc: ["'self'", "'unsafe-inline'"],
           styleSrc: ["'self'", "'unsafe-inline'"],
           imgSrc: ["'self'", 'data:', 'blob:'],
+          mediaSrc: ["'self'", 'data:', 'blob:'],
           frameSrc: ["'self'", 'blob:'],
           objectSrc: ["'self'", 'blob:'],
           frameAncestors: ["'self'"],

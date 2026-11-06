@@ -4,6 +4,7 @@ export interface ValidatedRecipient {
   userPk: number;
   userId: string;
   fullName: string;
+  matchedAlias?: string;
 }
 
 export interface RecipientResolutionResult {
@@ -14,11 +15,6 @@ export interface RecipientResolutionResult {
   statusNote: string;
 }
 
-/**
- * Custom syntax parser callback signature.
- * Once the teacher confirms the exact message syntax (REQ-03), a parser function
- * returning extracted candidate User IDs and optional cleaned message text can be registered here.
- */
 export type RecipientSyntaxExtractor = (rawMessage: string) => {
   candidateUserIds: string[];
   cleanedMessage: string | null;
@@ -26,11 +22,6 @@ export type RecipientSyntaxExtractor = (rawMessage: string) => {
 
 let activeSyntaxExtractor: RecipientSyntaxExtractor | null = null;
 
-/**
- * Registers or clears a confirmed recipient syntax extractor (REQ-03).
- * By default in production (`null`), no syntax is assumed or invented ("ห้ามกำหนด Syntax ขึ้นมาเอง"),
- * and all incoming files/URLs without a confirmed syntax match are safely stored in PUBLIC.
- */
 export function setRecipientSyntaxExtractor(extractor: RecipientSyntaxExtractor | null): void {
   activeSyntaxExtractor = extractor;
 }
@@ -39,15 +30,113 @@ export function getRecipientSyntaxExtractor(): RecipientSyntaxExtractor | null {
   return activeSyntaxExtractor;
 }
 
+interface ActiveUserRecord {
+  id: number;
+  user_id: string;
+  full_name: string;
+  line_aliases: string;
+}
+
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
- * Resolves the target recipient(s) of a file or URL from its accompanying message text.
- *
- * Strict compliance with REQ-03:
- * - ใช้ข้อความ (Message/Caption) ที่ส่งมากับไฟล์เป็นข้อมูลสำหรับระบุผู้รับ
- * - รูปแบบ Syntax สำหรับระบุผู้รับยังไม่ถูกกำหนด เนื่องจากต้องรอข้อมูลจากอาจารย์ (ห้ามกำหนด Syntax ขึ้นมาเอง)
- * - หากไม่มีข้อความ หรือไม่สามารถ Parse ข้อความเพื่อระบุผู้รับได้ ให้จัดเก็บไฟล์ในพื้นที่ Public / ไม่ระบุบุคคล
- * - ห้ามทิ้งไฟล์เพียงเพราะไม่สามารถระบุผู้รับได้
- * - รองรับทั้งแบบ 1 User และหลาย Users เมื่ออาจารย์ยืนยัน Syntax แล้ว
+ * Splits a message by the first `/` separator (ignoring `http://` or `https://`).
+ * Format:
+ * - "Opor / ข้อความที่ฝาก" -> { hasSlash: true, recipientPart: "Opor", commentPart: "ข้อความที่ฝาก" }
+ * - "/ ข้อความส่วนกลาง"   -> { hasSlash: true, recipientPart: "", commentPart: "ข้อความส่วนกลาง" }
+ * - "Opor"               -> { hasSlash: false, recipientPart: "Opor", commentPart: null }
+ */
+function splitRecipientAndCommentBySlash(trimmedMessage: string): {
+  hasSlash: boolean;
+  recipientPart: string;
+  commentPart: string | null;
+} {
+  // Temporarily mask http:// and https:// so we don't split inside a URL scheme
+  const masked = trimmedMessage.replace(/https?:\/\//gi, (m) => '_'.repeat(m.length));
+  const slashIdx = masked.indexOf('/');
+
+  if (slashIdx === -1) {
+    return {
+      hasSlash: false,
+      recipientPart: trimmedMessage.trim(),
+      commentPart: null,
+    };
+  }
+
+  const recipientPart = trimmedMessage.slice(0, slashIdx).trim();
+  const afterSlash = trimmedMessage.slice(slashIdx + 1).trim();
+  return {
+    hasSlash: true,
+    recipientPart,
+    commentPart: afterSlash.length > 0 ? afterSlash : null,
+  };
+}
+
+/**
+ * Matches a recipient string (such as "Opor" or "Opor, Somchai")
+ * against active users' configured `line_aliases` (set by Admin on the website),
+ * `user_id`, or `full_name`.
+ */
+function matchRecipientTokens(
+  activeUsers: ActiveUserRecord[],
+  rawRecipientPart: string
+): ValidatedRecipient[] {
+  const normalizedPart = rawRecipientPart
+    .replace(/^@(?:to:)?/i, '')
+    .replace(/^(?:ฝากให้|ถึง|ส่งให้|สำหรับ)\s+/i, '')
+    .trim();
+
+  if (!normalizedPart) {
+    return [];
+  }
+
+  // Support multiple recipients separated by comma or "&" before "/" (e.g., "Opor, Somchai / งานกลุ่ม")
+  const candidateNames = normalizedPart
+    .split(/[,&]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const matchedById = new Map<number, ValidatedRecipient>();
+
+  for (const candidate of candidateNames) {
+    const candidateLower = candidate.toLowerCase();
+
+    for (const u of activeUsers) {
+      const aliasList = u.line_aliases
+        .split(/[,;|]+/)
+        .map((a) => a.trim())
+        .filter(Boolean);
+
+      const tokens = Array.from(
+        new Set([...aliasList, u.user_id.trim(), u.full_name.trim()])
+      ).filter(Boolean);
+
+      for (const token of tokens) {
+        if (token.toLowerCase() === candidateLower) {
+          matchedById.set(u.id, {
+            userPk: u.id,
+            userId: u.user_id,
+            fullName: u.full_name,
+            matchedAlias: token,
+          });
+          break;
+        }
+      }
+    }
+  }
+
+  return Array.from(matchedById.values());
+}
+
+/**
+ * Resolves the target recipient(s) and separated comment from an accompanying LINE message.
+ * Syntax:
+ * - "Opor / ข้อความฝากถึงผู้รับ" -> PRIVATE (Opor) + attachedMessage = "ข้อความฝากถึงผู้รับ"
+ * - "Opor"                     -> PRIVATE (Opor) + attachedMessage = null (ไม่มีข้อความฝาก)
+ * - "/ ข้อความส่วนกลาง"         -> PUBLIC + attachedMessage = "ข้อความส่วนกลาง"
+ * - "ข้อความทั่วไปที่ไม่ตรงชื่อใคร" -> PUBLIC + attachedMessage = "ข้อความทั่วไปที่ไม่ตรงชื่อใคร"
  */
 export function resolveRecipientsFromMessage(
   db: DatabaseSync,
@@ -65,64 +154,124 @@ export function resolveRecipientsFromMessage(
     };
   }
 
-  // If no syntax rule has been confirmed by the teacher yet, store safely in PUBLIC while keeping the message.
-  if (!activeSyntaxExtractor) {
-    return {
-      visibility: 'PUBLIC',
-      recipients: [],
-      attachedMessage: trimmed,
-      rawText: trimmed,
-      statusNote: 'Public (ยังไม่กำหนด Syntax ผู้รับ)',
-    };
-  }
+  // 1. If a custom syntax extractor is explicitly registered (e.g. automated test for custom syntax), try it first
+  if (activeSyntaxExtractor) {
+    const parsed = activeSyntaxExtractor(trimmed);
+    if (parsed && parsed.candidateUserIds && parsed.candidateUserIds.length > 0) {
+      const uniqueCandidateIds = Array.from(
+        new Set(parsed.candidateUserIds.map((u) => u.trim()).filter(Boolean))
+      );
+      const matchedRecipients: ValidatedRecipient[] = [];
 
-  const parsed = activeSyntaxExtractor(trimmed);
-  if (!parsed || !parsed.candidateUserIds || parsed.candidateUserIds.length === 0) {
-    return {
-      visibility: 'PUBLIC',
-      recipients: [],
-      attachedMessage: trimmed,
-      rawText: trimmed,
-      statusNote: 'Public (ข้อความไม่ตรงรูปแบบระบุผู้รับ)',
-    };
-  }
+      const stmt = db.prepare(
+        `SELECT id, user_id, full_name FROM users WHERE LOWER(user_id) = LOWER(?) AND status = 'ACTIVE' AND role = 'USER'`
+      );
 
-  // Verify candidate User IDs against active users in the database
-  const uniqueCandidateIds = Array.from(new Set(parsed.candidateUserIds.map((u) => u.trim()).filter(Boolean)));
-  const matchedRecipients: ValidatedRecipient[] = [];
+      for (const candidateId of uniqueCandidateIds) {
+        const row = stmt.get(candidateId) as
+          | { id: number; user_id: string; full_name: string }
+          | undefined;
+        if (row) {
+          matchedRecipients.push({
+            userPk: row.id,
+            userId: row.user_id,
+            fullName: row.full_name,
+          });
+        }
+      }
 
-  const stmt = db.prepare(
-    `SELECT id, user_id, full_name FROM users WHERE user_id = ? AND status = 'ACTIVE' AND role = 'USER'`
-  );
+      if (matchedRecipients.length > 0) {
+        return {
+          visibility: 'PRIVATE',
+          recipients: matchedRecipients,
+          attachedMessage: parsed.cleanedMessage ?? null,
+          rawText: trimmed,
+          statusNote: `Private (${matchedRecipients.map((r) => `${r.userId} ${r.fullName}`).join(', ')})`,
+        };
+      }
 
-  for (const candidateId of uniqueCandidateIds) {
-    const row = stmt.get(candidateId) as { id: number; user_id: string; full_name: string } | undefined;
-    if (row) {
-      matchedRecipients.push({
-        userPk: row.id,
-        userId: row.user_id,
-        fullName: row.full_name,
-      });
+      return {
+        visibility: 'PUBLIC',
+        recipients: [],
+        attachedMessage: parsed.cleanedMessage ?? trimmed,
+        rawText: trimmed,
+        statusNote: `Public (ไม่พบบัญชีผู้รับที่เปิดใช้งาน: ${uniqueCandidateIds.join(', ')})`,
+      };
     }
   }
 
-  // If none of the extracted User IDs match an active user account, fallback safely to PUBLIC (never drop the file!)
-  if (matchedRecipients.length === 0) {
+  const activeUsers = db
+    .prepare(
+      `SELECT id, user_id, full_name, COALESCE(line_aliases, '') AS line_aliases
+       FROM users
+       WHERE status = 'ACTIVE'`
+    )
+    .all() as unknown as ActiveUserRecord[];
+
+  const { hasSlash, recipientPart, commentPart } = splitRecipientAndCommentBySlash(trimmed);
+
+  // Case A: Message contains "/" -> e.g. "Opor / ตั๋วเครื่องบิน" or "/ เอกสารส่วนกลาง"
+  if (hasSlash) {
+    // "/ ข้อความ" -> Explicitly Public with Comment
+    if (!recipientPart) {
+      return {
+        visibility: 'PUBLIC',
+        recipients: [],
+        attachedMessage: commentPart,
+        rawText: trimmed,
+        statusNote: 'Public (ส่วนกลาง)',
+      };
+    }
+
+    const matched = matchRecipientTokens(activeUsers, recipientPart);
+    if (matched.length > 0) {
+      const labelList = matched.map((r) =>
+        r.matchedAlias && r.matchedAlias.toLowerCase() !== r.userId.toLowerCase()
+          ? `${r.userId} ${r.fullName} (${r.matchedAlias})`
+          : `${r.userId} ${r.fullName}`
+      );
+      return {
+        visibility: 'PRIVATE',
+        recipients: matched,
+        attachedMessage: commentPart,
+        rawText: trimmed,
+        statusNote: `Private (${labelList.join(', ')})`,
+      };
+    }
+
+    // Before "/" did not match any active user -> fallback safely to PUBLIC and preserve comment
     return {
       visibility: 'PUBLIC',
       recipients: [],
-      attachedMessage: trimmed,
+      attachedMessage: commentPart ?? trimmed,
       rawText: trimmed,
-      statusNote: `Public (ไม่พบบัญชีผู้รับที่เปิดใช้งาน: ${uniqueCandidateIds.join(', ')})`,
+      statusNote: `Public (ไม่พบผู้รับ "${recipientPart}" ในระบบ)`,
     };
   }
 
+  // Case B: Message does NOT contain "/" -> Check if it's a recipient name ("Opor")
+  const matchedWithoutSlash = matchRecipientTokens(activeUsers, recipientPart);
+  if (matchedWithoutSlash.length > 0) {
+    const labelList = matchedWithoutSlash.map((r) =>
+      r.matchedAlias && r.matchedAlias.toLowerCase() !== r.userId.toLowerCase()
+        ? `${r.userId} ${r.fullName} (${r.matchedAlias})`
+        : `${r.userId} ${r.fullName}`
+    );
+    return {
+      visibility: 'PRIVATE',
+      recipients: matchedWithoutSlash,
+      attachedMessage: null, // No "/" was provided -> no comment
+      rawText: trimmed,
+      statusNote: `Private (${labelList.join(', ')})`,
+    };
+  }
+
+  // Case C: Message has no "/" and does not match any user -> Public file with this message as Comment
   return {
-    visibility: 'PRIVATE',
-    recipients: matchedRecipients,
-    attachedMessage: parsed.cleanedMessage ?? trimmed,
+    visibility: 'PUBLIC',
+    recipients: [],
+    attachedMessage: trimmed,
     rawText: trimmed,
-    statusNote: `Private (${matchedRecipients.map((r) => `${r.userId} ${r.fullName}`).join(', ')})`,
+    statusNote: 'Public (ส่วนกลาง)',
   };
 }
-

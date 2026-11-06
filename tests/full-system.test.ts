@@ -95,6 +95,14 @@ async function main() {
     contentType: 'application/zip',
     data: oversizedBytes,
   });
+  mockContentStore.set('msg_file_boarding_pass_opor', {
+    contentType: 'application/pdf',
+    data: samplePdfBytes,
+  });
+  mockContentStore.set('msg_file_opor_with_comment', {
+    contentType: 'application/pdf',
+    data: samplePdfBytes,
+  });
 
   const mockLineServer = http.createServer((req, res) => {
     const url = req.url || '';
@@ -456,9 +464,17 @@ async function main() {
         });
         assert.equal(res.status, 200);
 
-        // Verify files are stored on disk under storage/public/
+        // Verify files are stored on disk under storage/public/ with real image extension (.png, NOT .bin)
         const publicFilesOnDisk = fs.readdirSync(appConfig.paths.publicStorage);
         assert.equal(publicFilesOnDisk.length, 2);
+        assert.ok(
+          publicFilesOnDisk.some((f) => f.endsWith('.png')),
+          'Expected LINE image to be saved with .png extension instead of .bin'
+        );
+        assert.ok(
+          !publicFilesOnDisk.some((f) => f.endsWith('.bin')),
+          'Expected no .bin extension for LINE image'
+        );
 
         // Verify LINE Reply was sent with file name, recipient (Public), size, and success status
         const lastReply = sentReplies.find((r) => r.replyToken === 'reply_token_pub_001');
@@ -976,6 +992,205 @@ async function main() {
         assert.ok(restoredFile);
 
         return `Backup (${backupId}) and full Restore verified (${countBefore} files & DB integrity 100% restored)`;
+      }
+    );
+
+    // =========================================================================
+    // TEST-13: LINE ALIAS MAPPING ("Opor") + SEQUENTIAL MESSAGE-THEN-FILE PAIRING
+    // =========================================================================
+    await runStep(
+      'TEST-13',
+      'LINE Alias & Sequential Message-to-File Pairing',
+      'ทดสอบตั้งค่าชื่อเรียกใน LINE (เช่น Opor) ผ่าน Admin และพิมพ์ข้อความ "Opor" ก่อนส่งไฟล์ BoardingPass ตามมาในแชท',
+      async () => {
+        const u2Row = getDb()
+          .prepare('SELECT id FROM users WHERE user_id = ?')
+          .get('6501002') as { id: number };
+
+        // 1. Admin configures lineAliases = "Opor, โอปอ" for user 6501002
+        const updateAliasRes = await adminClient.request('PUT', `/api/admin/users/${u2Row.id}`, {
+          fullName: 'สมหญิง นักศึกษา 2',
+          lineAliases: 'Opor, โอปอ',
+        });
+        assert.equal(updateAliasRes.status, 200);
+        assert.equal(updateAliasRes.data.user.lineAliases, 'Opor, โอปอ');
+
+        // 2. Teacher sends text message "Opor" first (Webhook 1 at 21:02)
+        const textFirstPayload = {
+          destination: 'Ubot',
+          events: [
+            {
+              type: 'message',
+              webhookEventId: 'evt_seq_opor_text_1',
+              timestamp: Date.now(),
+              replyToken: 'reply_seq_opor_text_1',
+              source: {
+                type: 'user',
+                userId: 'U11111111111111111111111111111111',
+              },
+              message: {
+                id: '639450879720161521',
+                type: 'text',
+                text: 'Opor',
+              },
+            },
+          ],
+        };
+        const signedTextFirst = signWebhookBody(textFirstPayload);
+        const textFirstRes = await adminClient.request(
+          'POST',
+          '/api/line/webhook',
+          signedTextFirst.raw,
+          {
+            'Content-Type': 'application/json',
+            'x-line-signature': signedTextFirst.sig,
+          }
+        );
+        assert.equal(textFirstRes.status, 200);
+
+        const textReply = sentReplies.find((r) => r.replyToken === 'reply_seq_opor_text_1');
+        assert.ok(textReply);
+        assert.ok(textReply.messages[0].text.includes('ตั้งค่าผู้รับสำหรับไฟล์ถัดไปเรียบร้อยแล้ว'));
+        assert.ok(textReply.messages[0].text.includes('6501002'));
+
+        // 3. Teacher sends file "BoardingPass_WORRAWAT_PHATCHARA_SL_JOBNOZ.pdf" right after (Webhook 2 at 21:02)
+        const fileSecondPayload = {
+          destination: 'Ubot',
+          events: [
+            {
+              type: 'message',
+              webhookEventId: 'evt_seq_opor_file_2',
+              timestamp: Date.now() + 1000,
+              replyToken: 'reply_seq_opor_file_2',
+              source: {
+                type: 'user',
+                userId: 'U11111111111111111111111111111111',
+              },
+              message: {
+                id: 'msg_file_boarding_pass_opor',
+                type: 'file',
+                fileName: 'BoardingPass_WORRAWAT_PHATCHARA_SL_JOBNOZ.pdf',
+                fileSize: samplePdfBytes.length,
+              },
+            },
+          ],
+        };
+        const signedFileSecond = signWebhookBody(fileSecondPayload);
+        const fileSecondRes = await adminClient.request(
+          'POST',
+          '/api/line/webhook',
+          signedFileSecond.raw,
+          {
+            'Content-Type': 'application/json',
+            'x-line-signature': signedFileSecond.sig,
+          }
+        );
+        assert.equal(fileSecondRes.status, 200);
+
+        const fileReply = sentReplies.find((r) => r.replyToken === 'reply_seq_opor_file_2');
+        assert.ok(fileReply);
+        assert.ok(
+          fileReply.messages[0].text.includes('BoardingPass_WORRAWAT_PHATCHARA_SL_JOBNOZ.pdf')
+        );
+        assert.ok(fileReply.messages[0].text.includes('Private (6501002'));
+
+        // Verify Student 2 (6501002) now sees this file in their Private files with NO comment (attachedMessage === null)
+        const s2FilesAfter = await student2Client.request('GET', '/api/files?visibility=PRIVATE');
+        assert.equal(s2FilesAfter.status, 200);
+        assert.equal(s2FilesAfter.data.files.length, 1);
+        assert.equal(
+          s2FilesAfter.data.files[0].originalName,
+          'BoardingPass_WORRAWAT_PHATCHARA_SL_JOBNOZ.pdf'
+        );
+        assert.equal(s2FilesAfter.data.files[0].attachedMessage, null);
+
+        // 4. Teacher sends "Opor / ตั๋วเครื่องบินไปเชียงใหม่" followed by another file -> separated Private + Comment!
+        const slashTextPayload = {
+          destination: 'Ubot',
+          events: [
+            {
+              type: 'message',
+              webhookEventId: 'evt_seq_opor_slash_text_3',
+              timestamp: Date.now() + 2000,
+              replyToken: 'reply_seq_opor_slash_text_3',
+              source: {
+                type: 'user',
+                userId: 'U11111111111111111111111111111111',
+              },
+              message: {
+                id: 'msg_opor_slash_comment_3',
+                type: 'text',
+                text: 'Opor / ตั๋วเครื่องบินไปเชียงใหม่',
+              },
+            },
+          ],
+        };
+        const signedSlashText = signWebhookBody(slashTextPayload);
+        await adminClient.request('POST', '/api/line/webhook', signedSlashText.raw, {
+          'Content-Type': 'application/json',
+          'x-line-signature': signedSlashText.sig,
+        });
+
+        const slashFilePayload = {
+          destination: 'Ubot',
+          events: [
+            {
+              type: 'message',
+              webhookEventId: 'evt_seq_opor_slash_file_4',
+              timestamp: Date.now() + 3000,
+              replyToken: 'reply_seq_opor_slash_file_4',
+              source: {
+                type: 'user',
+                userId: 'U11111111111111111111111111111111',
+              },
+              message: {
+                id: 'msg_file_opor_with_comment',
+                type: 'file',
+                fileName: 'Itinerary_ChiangMai.pdf',
+                fileSize: samplePdfBytes.length,
+              },
+            },
+          ],
+        };
+        const signedSlashFile = signWebhookBody(slashFilePayload);
+        await adminClient.request('POST', '/api/line/webhook', signedSlashFile.raw, {
+          'Content-Type': 'application/json',
+          'x-line-signature': signedSlashFile.sig,
+        });
+
+        const s2FilesWithComment = await student2Client.request(
+          'GET',
+          '/api/files?visibility=PRIVATE'
+        );
+        assert.equal(s2FilesWithComment.status, 200);
+        assert.equal(s2FilesWithComment.data.files.length, 2);
+        const itineraryFile = s2FilesWithComment.data.files.find(
+          (f: any) => f.originalName === 'Itinerary_ChiangMai.pdf'
+        );
+        assert.ok(itineraryFile);
+        assert.equal(itineraryFile.attachedMessage, 'ตั๋วเครื่องบินไปเชียงใหม่');
+
+        // 5. Admin edits comment via PATCH /api/admin/files/:fileUuid/comment
+        const editCommentRes = await adminClient.request(
+          'PATCH',
+          `/api/admin/files/${itineraryFile.fileUuid}/comment`,
+          { comment: 'ตั๋วเครื่องบินไปเชียงใหม่ (แก้ไขโดย Admin)' }
+        );
+        assert.equal(editCommentRes.status, 200);
+        assert.equal(
+          editCommentRes.data.attachedMessage,
+          'ตั๋วเครื่องบินไปเชียงใหม่ (แก้ไขโดย Admin)'
+        );
+
+        // 6. Admin bulk-deletes the 2 selected files via POST /api/admin/files/bulk-delete
+        const bulkDeleteRes = await adminClient.request('POST', '/api/admin/files/bulk-delete', {
+          deleteAll: false,
+          fileUuids: s2FilesWithComment.data.files.map((f: any) => f.fileUuid),
+        });
+        assert.equal(bulkDeleteRes.status, 200);
+        assert.equal(bulkDeleteRes.data.deletedCount, 2);
+
+        return 'Verified "Opor / Comment" slash syntax, Admin comment edit, and Multi-select Bulk Delete';
       }
     );
 

@@ -1,6 +1,78 @@
 @import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  color-scheme: light;
+}
+
+html.dark {
+  color-scheme: dark;
+}
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans Thai", sans-serif;
 }
 
+/* ============================================================================
+   Google Drive Dark Mode Global Surface Adaptation (Admin, Modals, Inputs)
+   Ensures all components (including AdminDashboard, LoginPage, Modals)
+   adapt seamlessly when Device / System Theme is in Dark Mode (.dark)
+============================================================================ */
+html.dark .bg-white {
+  background-color: #1E1F20 !important;
+}
+
+html.dark .bg-slate-50,
+html.dark .bg-slate-50\/80,
+html.dark .bg-slate-50\/70 {
+  background-color: #131314 !important;
+}
+
+html.dark .bg-slate-100,
+html.dark .bg-slate-100\/90 {
+  background-color: #282A2C !important;
+}
+
+html.dark .bg-slate-200 {
+  background-color: #333537 !important;
+}
+
+html.dark .text-slate-900,
+html.dark .text-slate-800 {
+  color: #E3E3E3 !important;
+}
+
+html.dark .text-slate-700,
+html.dark .text-slate-600 {
+  color: #C4C7C5 !important;
+}
+
+html.dark .text-slate-500,
+html.dark .text-slate-400 {
+  color: #8E918F !important;
+}
+
+html.dark .border-slate-100,
+html.dark .border-slate-200,
+html.dark .border-slate-200\/80,
+html.dark .border-slate-200\/90,
+html.dark .border-slate-300 {
+  border-color: #3C4043 !important;
+}
+
+html.dark .divide-slate-100 > :not([hidden]) ~ :not([hidden]),
+html.dark .divide-slate-200 > :not([hidden]) ~ :not([hidden]),
+html.dark .divide-slate-200\/70 > :not([hidden]) ~ :not([hidden]) {
+  border-color: #3C4043 !important;
+}
+
+html.dark input:not([type="checkbox"]):not([type="radio"]),
+html.dark select,
+html.dark textarea {
+  color: #E3E3E3;
+}
+
+html.dark input::placeholder,
+html.dark textarea::placeholder {
+  color: #8E918F;
+}

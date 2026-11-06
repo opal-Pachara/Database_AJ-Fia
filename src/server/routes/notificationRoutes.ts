@@ -1,8 +1,39 @@
+import crypto from 'node:crypto';
 import { Router, Request, Response } from 'express';
 import { getDb, runInTransaction } from '../db/connection.js';
 import { requireAuth } from '../middleware/auth.js';
+import { registerRealtimeClient } from '../services/realtimeEvents.js';
 
 export const notificationRouter = Router();
+
+/**
+ * GET /api/notifications/stream
+ * Server-Sent Events (SSE) สำหรับอัปเดตหน้าเว็บและส่งการแจ้งเตือนแบบ Real-Time ทันทีที่มีไฟล์หรือลิงก์เข้ามา
+ */
+notificationRouter.get('/stream', requireAuth(), (req: Request, res: Response) => {
+  const user = req.authUser!;
+
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
+  res.write(`: connected ${new Date().toISOString()}\n\n`);
+
+  const clientId = crypto.randomUUID();
+  const cleanup = registerRealtimeClient({
+    clientId,
+    userPk: user.id,
+    userId: user.userId,
+    role: user.role,
+    res,
+  });
+
+  req.on('close', () => {
+    cleanup();
+  });
+});
 
 /**
  * GET /api/notifications

@@ -1,4 +1,8 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { appConfig } from '../config.js';
+import { detectFileCategoryAndPreview } from '../services/webhookProcessor.js';
 
 export function initializeSchema(db: DatabaseSync): void {
   db.exec(`
@@ -12,6 +16,7 @@ export function initializeSchema(db: DatabaseSync): void {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id TEXT NOT NULL UNIQUE,
       full_name TEXT NOT NULL,
+      line_aliases TEXT NOT NULL DEFAULT '',
       password_hash TEXT NOT NULL,
       role TEXT NOT NULL DEFAULT 'USER' CHECK (role IN ('USER', 'ADMIN')),
       status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'INACTIVE', 'SUSPENDED')),
@@ -231,5 +236,91 @@ export function initializeSchema(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_system_logs_created ON system_logs(created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_system_logs_category ON system_logs(category, level, created_at DESC);
   `);
+
+  // Safe migration for existing databases: ensure line_aliases column exists on users
+  const userCols = db.prepare(`PRAGMA table_info(users)`).all() as Array<{ name: string }>;
+  if (!userCols.some((c) => c.name === 'line_aliases')) {
+    db.exec(`ALTER TABLE users ADD COLUMN line_aliases TEXT NOT NULL DEFAULT ''`);
+  }
+
+  // Ensure existing VIDEO and AUDIO files are marked previewable
+  db.exec(`UPDATE files SET is_previewable = 1 WHERE file_category IN ('PDF', 'IMAGE', 'VIDEO', 'AUDIO')`);
+
+  // Automatically repair any existing LINE_IMAGE / LINE_VIDEO / LINE_AUDIO files that were saved as .bin
+  try {
+    const binRows = db
+      .prepare(
+        `SELECT id, file_uuid, original_name, stored_filename, relative_storage_path, mime_type
+         FROM files
+         WHERE file_extension = 'bin' OR original_name LIKE '%.bin'`
+      )
+      .all() as Array<{
+      id: number;
+      file_uuid: string;
+      original_name: string;
+      stored_filename: string;
+      relative_storage_path: string;
+      mime_type: string;
+    }>;
+
+    for (const row of binRows) {
+      const absOldPath = path.resolve(appConfig.paths.storage, row.relative_storage_path);
+      const inferredMsgType = row.original_name.startsWith('LINE_IMAGE_')
+        ? 'image'
+        : row.original_name.startsWith('LINE_VIDEO_')
+        ? 'video'
+        : row.original_name.startsWith('LINE_AUDIO_')
+        ? 'audio'
+        : null;
+
+      const detected = detectFileCategoryAndPreview(
+        row.mime_type,
+        row.original_name,
+        inferredMsgType,
+        absOldPath
+      );
+
+      if (detected.extension !== 'bin') {
+        const newOriginalName = row.original_name.replace(/\.bin$/i, `.${detected.extension}`);
+        const newStoredFilename = `${row.file_uuid}.${detected.extension}`;
+        const newRelPath = row.relative_storage_path.replace(
+          /[^/\\]+$/,
+          newStoredFilename
+        );
+        const absNewPath = path.resolve(appConfig.paths.storage, newRelPath);
+
+        if (fs.existsSync(absOldPath) && absOldPath !== absNewPath) {
+          fs.renameSync(absOldPath, absNewPath);
+        }
+
+        db.prepare(
+          `UPDATE files
+           SET original_name = ?,
+               stored_filename = ?,
+               relative_storage_path = ?,
+               mime_type = ?,
+               file_extension = ?,
+               file_category = ?,
+               is_previewable = ?
+           WHERE id = ?`
+        ).run(
+          newOriginalName,
+          newStoredFilename,
+          newRelPath,
+          detected.effectiveMimeType,
+          detected.extension,
+          detected.category,
+          detected.isPreviewable,
+          row.id
+        );
+
+        db.prepare(
+          `UPDATE notifications SET title = ?, file_type = ? WHERE file_pk = ?`
+        ).run(newOriginalName, detected.category, row.id);
+      }
+    }
+  } catch {
+    // Ignore non-critical startup repair errors
+  }
 }
 

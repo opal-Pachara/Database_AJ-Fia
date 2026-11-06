@@ -13,6 +13,7 @@ import {
   RecipientResolutionResult,
 } from './recipientParser.js';
 import { createNotificationsForIncomingItem } from './notificationService.js';
+import { broadcastRealtimeEvent } from './realtimeEvents.js';
 import {
   resolveSafeStoragePath,
   sanitizeDisplayFileName,
@@ -62,56 +63,254 @@ export interface LineWebhookPayload {
   events: LineWebhookEvent[];
 }
 
-function detectFileCategoryAndPreview(
+interface PendingSenderCaption {
+  text: string;
+  messageId: string;
+  createdAtMs: number;
+  lastUsedAtMs: number;
+  usedCount: number;
+}
+
+const pendingSenderCaptions = new Map<string, PendingSenderCaption>();
+
+export function clearPendingSenderCaptions(): void {
+  pendingSenderCaptions.clear();
+}
+
+function consumePendingSenderCaption(senderLineUserId: string): {
+  text: string;
+  messageId: string;
+} | null {
+  if (!senderLineUserId) return null;
+  const entry = pendingSenderCaptions.get(senderLineUserId);
+  if (!entry) return null;
+
+  const now = Date.now();
+  // Before first file arrives: valid for 3 minutes (180 seconds)
+  // After first file arrives: valid for 10 seconds to support multi-file simultaneous burst uploads
+  const isExpired =
+    entry.usedCount === 0
+      ? now - entry.createdAtMs > 180 * 1000
+      : now - entry.lastUsedAtMs > 10 * 1000;
+
+  if (isExpired) {
+    pendingSenderCaptions.delete(senderLineUserId);
+    return null;
+  }
+
+  entry.usedCount += 1;
+  entry.lastUsedAtMs = now;
+  return { text: entry.text, messageId: entry.messageId };
+}
+
+export function detectMagicBytesFormat(filePath?: string): {
+  extension: string;
+  mimeType: string;
+} | null {
+  if (!filePath || !fs.existsSync(filePath)) return null;
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(16);
+    const bytesRead = fs.readSync(fd, buf, 0, 16, 0);
+    fs.closeSync(fd);
+    if (bytesRead < 4) return null;
+
+    // JPEG: FF D8 FF
+    if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
+      return { extension: 'jpg', mimeType: 'image/jpeg' };
+    }
+    // PNG: 89 50 4E 47 0D 0A 1A 0A
+    if (
+      buf[0] === 0x89 &&
+      buf[1] === 0x50 &&
+      buf[2] === 0x4e &&
+      buf[3] === 0x47
+    ) {
+      return { extension: 'png', mimeType: 'image/png' };
+    }
+    // GIF: 47 49 46 38 ("GIF8")
+    if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38) {
+      return { extension: 'gif', mimeType: 'image/gif' };
+    }
+    // WEBP: "RIFF" .... "WEBP"
+    if (
+      bytesRead >= 12 &&
+      buf.toString('ascii', 0, 4) === 'RIFF' &&
+      buf.toString('ascii', 8, 12) === 'WEBP'
+    ) {
+      return { extension: 'webp', mimeType: 'image/webp' };
+    }
+    // PDF: "%PDF"
+    if (buf.toString('ascii', 0, 4) === '%PDF') {
+      return { extension: 'pdf', mimeType: 'application/pdf' };
+    }
+    // ISO Base Media File Format (MP4, MOV, M4A, HEIC): bytes 4..8 === "ftyp"
+    if (bytesRead >= 12 && buf.toString('ascii', 4, 8) === 'ftyp') {
+      const brand = buf.toString('ascii', 8, 12).toLowerCase();
+      if (brand.startsWith('m4a')) {
+        return { extension: 'm4a', mimeType: 'audio/mp4' };
+      }
+      if (brand === 'qt  ') {
+        return { extension: 'mov', mimeType: 'video/quicktime' };
+      }
+      return { extension: 'mp4', mimeType: 'video/mp4' };
+    }
+  } catch {
+    // Ignore read error
+  }
+  return null;
+}
+
+export function detectFileCategoryAndPreview(
   mimeType: string,
-  originalName: string
+  originalName?: string | null,
+  messageType?: string | null,
+  filePath?: string
 ): {
   category: 'PDF' | 'IMAGE' | 'DOCUMENT' | 'VIDEO' | 'AUDIO' | 'ARCHIVE' | 'OTHER';
   extension: string;
+  effectiveMimeType: string;
   isPreviewable: number;
 } {
-  const extFromName = path.extname(originalName).toLowerCase().replace(/^\./, '');
-  const mime = mimeType.toLowerCase();
+  const rawExt = originalName ? path.extname(originalName).toLowerCase().replace(/^\./, '') : '';
+  const extFromName = rawExt === 'bin' ? '' : rawExt;
+  const cleanMime = (mimeType || '').split(';')[0].trim().toLowerCase();
+  const magic = detectMagicBytesFormat(filePath);
 
   let extension = extFromName;
+  let effectiveMimeType = cleanMime || 'application/octet-stream';
+
   if (!extension) {
-    if (mime === 'application/pdf') extension = 'pdf';
-    else if (mime === 'image/jpeg' || mime === 'image/jpg') extension = 'jpg';
-    else if (mime === 'image/png') extension = 'png';
-    else if (mime === 'image/gif') extension = 'gif';
-    else if (mime === 'image/webp') extension = 'webp';
-    else if (mime === 'video/mp4') extension = 'mp4';
-    else if (mime === 'audio/m4a' || mime === 'audio/mp4' || mime === 'audio/x-m4a') extension = 'm4a';
-    else if (mime === 'audio/mpeg') extension = 'mp3';
-    else extension = 'bin';
+    if (magic) {
+      extension = magic.extension;
+      if (
+        !effectiveMimeType ||
+        effectiveMimeType === 'application/octet-stream' ||
+        effectiveMimeType === 'binary/octet-stream'
+      ) {
+        effectiveMimeType = magic.mimeType;
+      }
+    } else if (cleanMime === 'application/pdf') {
+      extension = 'pdf';
+    } else if (cleanMime === 'image/jpeg' || cleanMime === 'image/jpg') {
+      extension = 'jpg';
+    } else if (cleanMime === 'image/png') {
+      extension = 'png';
+    } else if (cleanMime === 'image/gif') {
+      extension = 'gif';
+    } else if (cleanMime === 'image/webp') {
+      extension = 'webp';
+    } else if (cleanMime === 'image/heic' || cleanMime === 'image/heif') {
+      extension = 'jpg';
+      effectiveMimeType = 'image/jpeg';
+    } else if (cleanMime === 'video/mp4') {
+      extension = 'mp4';
+    } else if (cleanMime === 'video/quicktime') {
+      extension = 'mov';
+    } else if (cleanMime === 'video/webm') {
+      extension = 'webm';
+    } else if (
+      cleanMime === 'audio/m4a' ||
+      cleanMime === 'audio/mp4' ||
+      cleanMime === 'audio/x-m4a' ||
+      cleanMime === 'audio/aac'
+    ) {
+      extension = 'm4a';
+    } else if (cleanMime === 'audio/mpeg' || cleanMime === 'audio/mp3') {
+      extension = 'mp3';
+    } else if (messageType === 'image') {
+      extension = 'jpg';
+      effectiveMimeType = 'image/jpeg';
+    } else if (messageType === 'video') {
+      extension = 'mp4';
+      effectiveMimeType = 'video/mp4';
+    } else if (messageType === 'audio') {
+      extension = 'm4a';
+      effectiveMimeType = 'audio/mp4';
+    } else {
+      extension = 'bin';
+    }
+  }
+
+  // Ensure proper MIME type when extension is known
+  if (
+    effectiveMimeType === 'application/octet-stream' ||
+    effectiveMimeType === 'binary/octet-stream'
+  ) {
+    if (extension === 'jpg' || extension === 'jpeg') effectiveMimeType = 'image/jpeg';
+    else if (extension === 'png') effectiveMimeType = 'image/png';
+    else if (extension === 'gif') effectiveMimeType = 'image/gif';
+    else if (extension === 'webp') effectiveMimeType = 'image/webp';
+    else if (extension === 'pdf') effectiveMimeType = 'application/pdf';
+    else if (extension === 'mp4') effectiveMimeType = 'video/mp4';
+    else if (extension === 'mov') effectiveMimeType = 'video/quicktime';
+    else if (extension === 'webm') effectiveMimeType = 'video/webm';
+    else if (extension === 'm4a') effectiveMimeType = 'audio/mp4';
+    else if (extension === 'mp3') effectiveMimeType = 'audio/mpeg';
   }
 
   // Normalize extension for safe disk storage
   extension = extension.replace(/[^a-z0-9]/g, '').slice(0, 12) || 'bin';
 
-  if (mime === 'application/pdf' || extension === 'pdf') {
-    return { category: 'PDF', extension: 'pdf', isPreviewable: 1 };
+  if (effectiveMimeType === 'application/pdf' || extension === 'pdf') {
+    return {
+      category: 'PDF',
+      extension: 'pdf',
+      effectiveMimeType: 'application/pdf',
+      isPreviewable: 1,
+    };
   }
 
   if (
-    mime.startsWith('image/') ||
-    ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(extension)
+    effectiveMimeType.startsWith('image/') ||
+    ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(extension) ||
+    messageType === 'image'
   ) {
-    const canPreview = ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(extension) ||
-      ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(mime);
-    return { category: 'IMAGE', extension, isPreviewable: canPreview ? 1 : 0 };
+    const finalExt = extension === 'bin' ? 'jpg' : extension;
+    const finalMime =
+      effectiveMimeType.startsWith('image/') ? effectiveMimeType : 'image/jpeg';
+    return {
+      category: 'IMAGE',
+      extension: finalExt,
+      effectiveMimeType: finalMime,
+      isPreviewable: 1,
+    };
   }
 
-  if (mime.startsWith('video/') || ['mp4', 'mov', 'avi', 'mkv', 'webm'].includes(extension)) {
-    return { category: 'VIDEO', extension, isPreviewable: 0 };
+  if (
+    effectiveMimeType.startsWith('video/') ||
+    ['mp4', 'mov', 'avi', 'mkv', 'webm'].includes(extension) ||
+    messageType === 'video'
+  ) {
+    const finalExt = extension === 'bin' ? 'mp4' : extension;
+    const finalMime =
+      effectiveMimeType.startsWith('video/') ? effectiveMimeType : 'video/mp4';
+    return {
+      category: 'VIDEO',
+      extension: finalExt,
+      effectiveMimeType: finalMime,
+      isPreviewable: 1,
+    };
   }
 
-  if (mime.startsWith('audio/') || ['mp3', 'm4a', 'wav', 'aac', 'ogg'].includes(extension)) {
-    return { category: 'AUDIO', extension, isPreviewable: 0 };
+  if (
+    effectiveMimeType.startsWith('audio/') ||
+    ['mp3', 'm4a', 'wav', 'aac', 'ogg'].includes(extension) ||
+    messageType === 'audio'
+  ) {
+    const finalExt = extension === 'bin' ? 'm4a' : extension;
+    const finalMime =
+      effectiveMimeType.startsWith('audio/') ? effectiveMimeType : 'audio/mp4';
+    return {
+      category: 'AUDIO',
+      extension: finalExt,
+      effectiveMimeType: finalMime,
+      isPreviewable: 1,
+    };
   }
 
   if (['zip', 'rar', '7z', 'tar', 'gz'].includes(extension)) {
-    return { category: 'ARCHIVE', extension, isPreviewable: 0 };
+    return { category: 'ARCHIVE', extension, effectiveMimeType, isPreviewable: 0 };
   }
 
   if (
@@ -130,10 +329,10 @@ function detectFileCategoryAndPreview(
       'odp',
     ].includes(extension)
   ) {
-    return { category: 'DOCUMENT', extension, isPreviewable: 0 };
+    return { category: 'DOCUMENT', extension, effectiveMimeType, isPreviewable: 0 };
   }
 
-  return { category: 'OTHER', extension, isPreviewable: 0 };
+  return { category: 'OTHER', extension, effectiveMimeType, isPreviewable: 0 };
 }
 
 function generateDefaultFileName(messageType: string, messageId: string, timestamp: number, ext: string): string {
@@ -383,9 +582,11 @@ async function handleIncomingMediaFileEvent(params: {
   const rawOriginalName = message.fileName;
 
   // Determine if there is a deterministic accompanying text message:
-  // 1. Via quotedMessageId pointing to a previous text message from the teacher
-  // 2. Via same-batch webhook payload (from iOS Share Sheet)
+  // 1. Via same-batch webhook payload (from iOS Share Sheet)
+  // 2. Via quotedMessageId pointing to a previous text message from the teacher
+  // 3. Via preceding text message sent by the same teacher (e.g., typing "Opor" then sending the file)
   let attachedText: string | null = pairedBatchText;
+  let pairedMessageIdHint: string | null = null;
 
   if (!attachedText && message.quotedMessageId) {
     const quotedRow = db
@@ -400,10 +601,19 @@ async function handleIncomingMediaFileEvent(params: {
         const parsedQuote = JSON.parse(quotedRow.raw_payload) as LineWebhookEvent;
         if (parsedQuote.message?.text) {
           attachedText = parsedQuote.message.text.trim();
+          pairedMessageIdHint = message.quotedMessageId;
         }
       } catch {
         // Ignore parse error
       }
+    }
+  }
+
+  if (!attachedText && event.source?.userId) {
+    const pending = consumePendingSenderCaption(event.source.userId);
+    if (pending) {
+      attachedText = pending.text;
+      pairedMessageIdHint = pending.messageId;
     }
   }
 
@@ -429,14 +639,13 @@ async function handleIncomingMediaFileEvent(params: {
     // 5. State = STORING
     updateWebhookStatus(eventPk, 'STORING');
 
-    const provisionalName = rawOriginalName
-      ? sanitizeDisplayFileName(rawOriginalName)
-      : generateDefaultFileName(messageType, messageId, event.timestamp, 'bin');
-
-    const { category, extension, isPreviewable } = detectFileCategoryAndPreview(
-      downloadResult.mimeType,
-      provisionalName
-    );
+    const { category, extension, effectiveMimeType, isPreviewable } =
+      detectFileCategoryAndPreview(
+        downloadResult.mimeType,
+        rawOriginalName ? sanitizeDisplayFileName(rawOriginalName) : null,
+        messageType,
+        tempFilePath
+      );
 
     const finalOriginalName = rawOriginalName
       ? sanitizeDisplayFileName(rawOriginalName)
@@ -488,7 +697,7 @@ async function handleIncomingMediaFileEvent(params: {
           finalOriginalName,
           storedFilename,
           relativeStoragePath,
-          downloadResult.mimeType,
+          effectiveMimeType,
           extension,
           category,
           downloadResult.sizeBytes,
@@ -523,10 +732,23 @@ async function handleIncomingMediaFileEvent(params: {
         visibility: preliminaryResolution.visibility,
         recipients: preliminaryResolution.recipients,
         receivedAt: receivedAtIso,
-        eventBatchHint: batchHintId || message.quotedMessageId || null,
+        eventBatchHint: batchHintId || pairedMessageIdHint || message.quotedMessageId || null,
       });
 
       updateWebhookStatus(eventPk, 'DATABASE_COMMITTED');
+    });
+
+    // Immediately push Real-Time SSE notification to connected web browsers
+    broadcastRealtimeEvent({
+      type: 'FILE_RECEIVED',
+      itemUuid: fileUuid,
+      title: finalOriginalName,
+      fileCategory: category,
+      visibility: preliminaryResolution.visibility,
+      recipientUserIds: preliminaryResolution.recipients.map((r) => r.userId),
+      attachedMessage: preliminaryResolution.attachedMessage,
+      fileSizeBytes: downloadResult.sizeBytes,
+      timestamp: receivedAtIso,
     });
 
     // 7. Send Reply via LINE OA ONLY AFTER Disk + DB Commit have succeeded (REQ-08)
@@ -534,6 +756,7 @@ async function handleIncomingMediaFileEvent(params: {
       `✅ จัดเก็บไฟล์สำเร็จ`,
       `• ชื่อไฟล์: ${finalOriginalName}`,
       `• ผู้รับไฟล์: ${preliminaryResolution.statusNote}`,
+      `• ข้อความที่ฝาก (Comment): ${preliminaryResolution.attachedMessage || '- (ไม่มีข้อความฝาก)'}`,
       `• ขนาดไฟล์: ${formatBytes(downloadResult.sizeBytes)}`,
       `• สถานะ: บันทึกไฟล์และฐานข้อมูลเรียบร้อยแล้ว`,
     ].join('\n');
@@ -707,12 +930,24 @@ async function handleIncomingTextEvent(params: {
         updateWebhookStatus(eventPk, 'DATABASE_COMMITTED');
       });
 
+      broadcastRealtimeEvent({
+        type: 'FILE_UPDATED',
+        itemUuid: quotedFile.file_uuid,
+        title: quotedFile.original_name,
+        fileCategory: quotedFile.file_category,
+        visibility: resolution.visibility,
+        recipientUserIds: resolution.recipients.map((r) => r.userId),
+        attachedMessage: resolution.attachedMessage,
+        fileSizeBytes: quotedFile.file_size_bytes,
+        timestamp: receivedAtIso,
+      });
+
       const replyText = [
-        `✅ อัปเดตข้อความและผู้รับของไฟล์สำเร็จ`,
+        `✅ อัปเดตผู้รับและข้อความที่ฝากของไฟล์สำเร็จ`,
         `• ชื่อไฟล์: ${quotedFile.original_name}`,
         `• ผู้รับไฟล์: ${resolution.statusNote}`,
+        `• ข้อความที่ฝาก (Comment): ${resolution.attachedMessage || '- (ไม่มีข้อความฝาก)'}`,
         `• ขนาดไฟล์: ${formatBytes(quotedFile.file_size_bytes)}`,
-        `• ข้อความแนบ: ${resolution.attachedMessage || '-'}`,
       ].join('\n');
 
       const replyRes = await sendLineReply(event.replyToken, replyText);
@@ -806,6 +1041,18 @@ async function handleIncomingTextEvent(params: {
         updateWebhookStatus(eventPk, 'DATABASE_COMMITTED');
       });
 
+      broadcastRealtimeEvent({
+        type: 'URL_RECEIVED',
+        itemUuid: message.id,
+        title: insertedUrls[0] || text,
+        fileCategory: 'URL',
+        visibility: resolution.visibility,
+        recipientUserIds: resolution.recipients.map((r) => r.userId),
+        attachedMessage: resolution.attachedMessage,
+        fileSizeBytes: null,
+        timestamp: receivedAtIso,
+      });
+
       const replyText = [
         `✅ บันทึกลิงก์ (URL) สำเร็จ (${insertedUrls.length} รายการ)`,
         `• ลิงก์: ${insertedUrls.join(', ')}`,
@@ -840,11 +1087,33 @@ async function handleIncomingTextEvent(params: {
   }
 
   // Case C: Standalone text message without URLs and not quoting a file
-  // Recorded in line_webhook_events so if the teacher quotes this message when sending a file next, it can be paired.
-  const infoReply = [
-    `ℹ️ ได้รับข้อความเรียบร้อยแล้ว (Message ID: ${message.id})`,
-    `หากต้องการแนบข้อความนี้กับไฟล์: สามารถส่งไฟล์พร้อมข้อความผ่าน Share Sheet หรือกด Reply (ตอบกลับ) ที่ตัวไฟล์ในแชทได้ทันที`,
-  ].join('\n');
+  // Store as pending caption/recipient for the next file(s) from this sender (e.g. typing "Opor" then sending a PDF)
+  const senderId = event.source?.userId || '';
+  if (senderId && text) {
+    pendingSenderCaptions.set(senderId, {
+      text,
+      messageId: message.id,
+      createdAtMs: Date.now(),
+      lastUsedAtMs: 0,
+      usedCount: 0,
+    });
+  }
+
+  const previewResolution = resolveRecipientsFromMessage(db, text);
+  const infoReply =
+    previewResolution.visibility === 'PRIVATE'
+      ? [
+          `📌 ตั้งค่าผู้รับสำหรับไฟล์ถัดไปเรียบร้อยแล้ว`,
+          `• ผู้รับไฟล์: ${previewResolution.statusNote}`,
+          `• ข้อความที่ฝาก (Comment): ${previewResolution.attachedMessage || '- (ไม่มีข้อความฝาก)'}`,
+          `• กรุณาส่งไฟล์ตามมาภายใน 3 นาที`,
+        ].join('\n')
+      : [
+          `ℹ️ ตั้งค่าไฟล์ถัดไปเป็น Public (ส่วนกลาง)`,
+          `• ผู้รับไฟล์: ${previewResolution.statusNote}`,
+          `• ข้อความที่ฝาก (Comment): ${previewResolution.attachedMessage || '- (ไม่มีข้อความฝาก)'}`,
+          `• เคล็ดลับ: พิมพ์ "ชื่อผู้รับ / ข้อความฝาก" (เช่น Opor / ตั๋วเครื่องบิน) เพื่อส่งแบบ Private พร้อม Comment`,
+        ].join('\n');
 
   const replyRes = await sendLineReply(event.replyToken, infoReply);
   updateWebhookStatus(eventPk, 'SUCCESS', null, replyRes.status);
