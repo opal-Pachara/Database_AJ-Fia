@@ -1,0 +1,43 @@
+{
+  "name": "line-oa-file-storage-portal",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ระบบรับฝากไฟล์ผ่าน LINE OA และให้ผู้ใช้งานดาวน์โหลดผ่านเว็บไซต์ (Windows 10/11 Self-Hosted)",
+  "type": "module",
+  "scripts": {
+    "dev:server": "tsx watch src/server/index.ts",
+    "dev:client": "vite",
+    "build:client": "vite build",
+    "build": "vite build",
+    "start": "tsx src/server/index.ts",
+    "backup": "tsx scripts/backup-now.ts",
+    "restore": "tsx scripts/restore-backup.ts",
+    "test": "tsx tests/full-system.test.ts"
+  },
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "hash-wasm": "^4.12.0",
+    "helmet": "^8.0.0",
+    "lucide-react": "^0.468.0",
+    "node-cron": "^3.0.3",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.0",
+    "@types/cookie-parser": "^1.4.8",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.2",
+    "@types/node-cron": "^3.0.11",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "tailwindcss": "^4.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5"
+  }
+}
+

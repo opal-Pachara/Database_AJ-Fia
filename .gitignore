@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+.env.local
+.env.*.local
+*.log
+.DS_Store
+thumbs.db
+local_storage_dev/
+test_storage_tmp/
+
