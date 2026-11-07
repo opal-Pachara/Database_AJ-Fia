@@ -58,6 +58,8 @@ interface RealtimeToastItem {
   fileSizeBytes?: number | null;
   visibility: 'PRIVATE' | 'PUBLIC';
   attachedMessage?: string | null;
+  uploaderName?: string | null;
+  uploaderPictureUrl?: string | null;
   timestamp?: string;
 }
 
@@ -1204,10 +1206,13 @@ export const App: React.FC = () => {
                   {typeof t.fileSizeBytes === 'number' && t.fileSizeBytes > 0 && (
                     <span>{formatFileSize(t.fileSizeBytes)}</span>
                   )}
+                  <span className="text-slate-300">
+                    • โดย {t.uploaderName || 'อาจารย์ผู้ส่งไฟล์ (LINE OA)'}
+                  </span>
                 </div>
                 {t.attachedMessage && (
-                  <p className="text-xs text-amber-200 bg-amber-500/15 border border-amber-400/30 px-2.5 py-1 rounded-lg">
-                    💬 ข้อความฝาก: {t.attachedMessage}
+                  <p className="text-xs text-[#FDE68A] bg-amber-950/80 border border-amber-500/40 px-2.5 py-1.5 rounded-lg font-medium">
+                    💬 ข้อความที่ฝาก: {t.attachedMessage}
                   </p>
                 )}
               </div>

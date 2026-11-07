@@ -15,6 +15,9 @@ export interface FileItem {
   fileCategory: 'PDF' | 'IMAGE' | 'DOCUMENT' | 'VIDEO' | 'AUDIO' | 'ARCHIVE' | 'OTHER';
   fileSizeBytes: number;
   attachedMessage: string | null;
+  uploaderName?: string | null;
+  uploaderPictureUrl?: string | null;
+  uploaderLineUserId?: string | null;
   visibility: 'PRIVATE' | 'PUBLIC';
   isPreviewable: boolean;
   receivedAt: string;
@@ -25,6 +28,9 @@ export interface UrlItem {
   urlUuid: string;
   url: string;
   attachedMessage: string | null;
+  uploaderName?: string | null;
+  uploaderPictureUrl?: string | null;
+  uploaderLineUserId?: string | null;
   visibility: 'PRIVATE' | 'PUBLIC';
   receivedAt: string;
 }

@@ -23,7 +23,7 @@ export function createApp(): Express {
           defaultSrc: ["'self'"],
           scriptSrc: ["'self'", "'unsafe-inline'"],
           styleSrc: ["'self'", "'unsafe-inline'"],
-          imgSrc: ["'self'", 'data:', 'blob:'],
+          imgSrc: ["'self'", 'data:', 'blob:', 'https://*.line-scdn.net', 'https://*.line.me', 'https:'],
           mediaSrc: ["'self'", 'data:', 'blob:'],
           frameSrc: ["'self'", 'blob:'],
           objectSrc: ["'self'", 'blob:'],

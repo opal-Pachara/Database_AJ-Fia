@@ -260,3 +260,66 @@ export function formatBytes(bytes: number): string {
   return `${gb.toFixed(2)} GB`;
 }
 
+export interface LineUserProfile {
+  displayName: string;
+  pictureUrl: string | null;
+}
+
+const lineProfileCache = new Map<string, { profile: LineUserProfile; expiresAtMs: number }>();
+
+/**
+ * Fetches the LINE user's display name and profile picture URL via LINE Messaging API.
+ * Uses a 30-minute in-memory cache and a fast timeout so webhook processing stays fast.
+ */
+export async function fetchLineUserProfile(lineUserId?: string | null): Promise<LineUserProfile> {
+  const defaultProfile: LineUserProfile = {
+    displayName: 'อาจารย์ผู้ส่งไฟล์ (LINE OA)',
+    pictureUrl: null,
+  };
+
+  if (!lineUserId || lineUserId === 'unknown') {
+    return defaultProfile;
+  }
+
+  const cached = lineProfileCache.get(lineUserId);
+  if (cached && cached.expiresAtMs > Date.now()) {
+    return cached.profile;
+  }
+
+  if (!appConfig.line.channelAccessToken) {
+    return defaultProfile;
+  }
+
+  try {
+    const profileUrl = `${appConfig.line.apiBaseUrl}/v2/bot/profile/${encodeURIComponent(lineUserId)}`;
+    const response = await fetch(profileUrl, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${appConfig.line.channelAccessToken}`,
+      },
+      signal: AbortSignal.timeout(2500),
+    });
+
+    if (response.ok) {
+      const data = (await response.json()) as {
+        displayName?: string;
+        pictureUrl?: string;
+      };
+      const profile: LineUserProfile = {
+        displayName: (data.displayName || '').trim() || defaultProfile.displayName,
+        pictureUrl: (data.pictureUrl || '').trim() || null,
+      };
+      lineProfileCache.set(lineUserId, {
+        profile,
+        expiresAtMs: Date.now() + 30 * 60 * 1000,
+      });
+      return profile;
+    }
+  } catch {
+    // Fallback gracefully to default profile
+  }
+
+  return defaultProfile;
+}
+
+

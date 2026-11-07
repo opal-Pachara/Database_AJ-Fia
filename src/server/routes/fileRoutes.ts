@@ -130,6 +130,9 @@ fileRouter.get('/', requireAuth(), (req: Request, res: Response) => {
       f.file_category AS fileCategory,
       f.file_size_bytes AS fileSizeBytes,
       f.attached_message AS attachedMessage,
+      COALESCE(f.uploader_name, 'อาจารย์ผู้ส่งไฟล์ (LINE OA)') AS uploaderName,
+      f.uploader_picture_url AS uploaderPictureUrl,
+      f.uploader_line_user_id AS uploaderLineUserId,
       f.visibility AS visibility,
       f.is_previewable AS isPreviewable,
       f.received_at AS receivedAt,
@@ -159,6 +162,9 @@ fileRouter.get('/', requireAuth(), (req: Request, res: Response) => {
     fileCategory: string;
     fileSizeBytes: number;
     attachedMessage: string | null;
+    uploaderName: string | null;
+    uploaderPictureUrl: string | null;
+    uploaderLineUserId: string | null;
     visibility: 'PRIVATE' | 'PUBLIC';
     isPreviewable: number;
     receivedAt: string;
@@ -266,6 +272,9 @@ fileRouter.get('/urls', requireAuth(), (req: Request, res: Response) => {
       u.url_uuid AS urlUuid,
       u.url AS url,
       u.attached_message AS attachedMessage,
+      COALESCE(u.uploader_name, 'อาจารย์ผู้ส่งไฟล์ (LINE OA)') AS uploaderName,
+      u.uploader_picture_url AS uploaderPictureUrl,
+      u.uploader_line_user_id AS uploaderLineUserId,
       u.visibility AS visibility,
       u.received_at AS receivedAt
     FROM url_records u

@@ -5,6 +5,7 @@ import { getDb, runInTransaction } from '../db/connection.js';
 import { appConfig } from '../config.js';
 import {
   downloadLineContentToTemp,
+  fetchLineUserProfile,
   formatBytes,
   sendLineReply,
 } from './lineApi.js';
@@ -69,6 +70,7 @@ interface PendingSenderCaption {
   createdAtMs: number;
   lastUsedAtMs: number;
   usedCount: number;
+  imageSetId?: string | null;
 }
 
 const pendingSenderCaptions = new Map<string, PendingSenderCaption>();
@@ -77,7 +79,10 @@ export function clearPendingSenderCaptions(): void {
   pendingSenderCaptions.clear();
 }
 
-function consumePendingSenderCaption(senderLineUserId: string): {
+function consumePendingSenderCaption(
+  senderLineUserId: string,
+  imageSetId?: string | null
+): {
   text: string;
   messageId: string;
 } | null {
@@ -86,8 +91,6 @@ function consumePendingSenderCaption(senderLineUserId: string): {
   if (!entry) return null;
 
   const now = Date.now();
-  // Before first file arrives: valid for 3 minutes (180 seconds)
-  // After first file arrives: valid for 10 seconds to support multi-file simultaneous burst uploads
   const isExpired =
     entry.usedCount === 0
       ? now - entry.createdAtMs > 180 * 1000
@@ -98,8 +101,20 @@ function consumePendingSenderCaption(senderLineUserId: string): {
     return null;
   }
 
+  // If already used once, only reuse if part of the same LINE multi-image burst (imageSetId)
+  if (entry.usedCount > 0 && (!imageSetId || entry.imageSetId !== imageSetId)) {
+    pendingSenderCaptions.delete(senderLineUserId);
+    return null;
+  }
+
   entry.usedCount += 1;
   entry.lastUsedAtMs = now;
+  entry.imageSetId = imageSetId || null;
+
+  if (!imageSetId) {
+    pendingSenderCaptions.delete(senderLineUserId);
+  }
+
   return { text: entry.text, messageId: entry.messageId };
 }
 
@@ -610,7 +625,10 @@ async function handleIncomingMediaFileEvent(params: {
   }
 
   if (!attachedText && event.source?.userId) {
-    const pending = consumePendingSenderCaption(event.source.userId);
+    const pending = consumePendingSenderCaption(
+      event.source.userId,
+      event.message?.imageSet?.id || null
+    );
     if (pending) {
       attachedText = pending.text;
       pairedMessageIdHint = pending.messageId;
@@ -618,10 +636,13 @@ async function handleIncomingMediaFileEvent(params: {
   }
 
   // Pre-resolve recipient for error reporting if known
-  const preliminaryResolution: RecipientResolutionResult = resolveRecipientsFromMessage(
+  let preliminaryResolution: RecipientResolutionResult = resolveRecipientsFromMessage(
     db,
     attachedText
   );
+
+  const senderLineUserId = event.source?.userId || 'unknown';
+  const uploaderProfile = await fetchLineUserProfile(senderLineUserId);
 
   const fileUuid = crypto.randomUUID();
   const tempFilePath = path.join(appConfig.paths.tempDir, `${fileUuid}.part`);
@@ -635,6 +656,19 @@ async function handleIncomingMediaFileEvent(params: {
       tempFilePath,
       declaredFileSize,
     });
+
+    // Re-check pendingSenderCaption in case the accompanying text webhook arrived while the file was downloading
+    if (!attachedText && event.source?.userId) {
+      const latePending = consumePendingSenderCaption(
+        event.source.userId,
+        event.message?.imageSet?.id || null
+      );
+      if (latePending) {
+        attachedText = latePending.text;
+        pairedMessageIdHint = latePending.messageId;
+        preliminaryResolution = resolveRecipientsFromMessage(db, attachedText);
+      }
+    }
 
     // 5. State = STORING
     updateWebhookStatus(eventPk, 'STORING');
@@ -687,8 +721,9 @@ async function handleIncomingMediaFileEvent(params: {
             file_uuid, webhook_event_pk, line_message_id, original_name,
             stored_filename, relative_storage_path, mime_type, file_extension,
             file_category, file_size_bytes, sha256_checksum, attached_message,
-            recipient_raw_text, visibility, is_previewable, status, received_at, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, datetime('now'))`
+            recipient_raw_text, uploader_line_user_id, uploader_name, uploader_picture_url,
+            visibility, is_previewable, status, received_at, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, datetime('now'))`
         )
         .run(
           fileUuid,
@@ -704,6 +739,9 @@ async function handleIncomingMediaFileEvent(params: {
           downloadResult.sha256Checksum,
           preliminaryResolution.attachedMessage,
           preliminaryResolution.rawText,
+          senderLineUserId,
+          uploaderProfile.displayName,
+          uploaderProfile.pictureUrl,
           preliminaryResolution.visibility,
           isPreviewable,
           receivedAtIso
@@ -748,6 +786,8 @@ async function handleIncomingMediaFileEvent(params: {
       recipientUserIds: preliminaryResolution.recipients.map((r) => r.userId),
       attachedMessage: preliminaryResolution.attachedMessage,
       fileSizeBytes: downloadResult.sizeBytes,
+      uploaderName: uploaderProfile.displayName,
+      uploaderPictureUrl: uploaderProfile.pictureUrl,
       timestamp: receivedAtIso,
     });
 
@@ -925,6 +965,11 @@ async function handleIncomingTextEvent(params: {
             receivedAt: receivedAtIso,
             eventBatchHint: message.quotedMessageId,
           });
+        } else {
+          db.prepare(`UPDATE notifications SET detail_message = ? WHERE file_pk = ?`).run(
+            resolution.attachedMessage,
+            quotedFile.id
+          );
         }
 
         updateWebhookStatus(eventPk, 'DATABASE_COMMITTED');
@@ -962,6 +1007,8 @@ async function handleIncomingTextEvent(params: {
 
   if (extractedUrls.length > 0) {
     const resolution = resolveRecipientsFromMessage(db, text);
+    const senderLineUserId = event.source?.userId || 'unknown';
+    const uploaderProfile = await fetchLineUserProfile(senderLineUserId);
 
     try {
       updateWebhookStatus(eventPk, 'STORING');
@@ -972,8 +1019,9 @@ async function handleIncomingTextEvent(params: {
         const insertUrlStmt = db.prepare(
           `INSERT INTO url_records (
             url_uuid, webhook_event_pk, line_message_id, url,
-            attached_message, visibility, status, received_at, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, datetime('now'))`
+            attached_message, uploader_line_user_id, uploader_name, uploader_picture_url,
+            visibility, status, received_at, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, datetime('now'))`
         );
 
         const insertUrlRecStmt = db.prepare(
@@ -989,6 +1037,9 @@ async function handleIncomingTextEvent(params: {
             message.id,
             urlItem,
             resolution.attachedMessage,
+            senderLineUserId,
+            uploaderProfile.displayName,
+            uploaderProfile.pictureUrl,
             resolution.visibility,
             receivedAtIso
           );
@@ -1012,6 +1063,8 @@ async function handleIncomingTextEvent(params: {
                 urlUuid,
                 url: urlItem,
                 attachedMessage: resolution.attachedMessage,
+                uploaderName: uploaderProfile.displayName,
+                uploaderPictureUrl: uploaderProfile.pictureUrl,
                 visibility: resolution.visibility,
                 receivedAt: receivedAtIso,
               },
@@ -1050,6 +1103,8 @@ async function handleIncomingTextEvent(params: {
         recipientUserIds: resolution.recipients.map((r) => r.userId),
         attachedMessage: resolution.attachedMessage,
         fileSizeBytes: null,
+        uploaderName: uploaderProfile.displayName,
+        uploaderPictureUrl: uploaderProfile.pictureUrl,
         timestamp: receivedAtIso,
       });
 
@@ -1057,6 +1112,7 @@ async function handleIncomingTextEvent(params: {
         `✅ บันทึกลิงก์ (URL) สำเร็จ (${insertedUrls.length} รายการ)`,
         `• ลิงก์: ${insertedUrls.join(', ')}`,
         `• ผู้รับ: ${resolution.statusNote}`,
+        `• ข้อความที่ฝาก (Comment): ${resolution.attachedMessage || '- (ไม่มีข้อความฝาก)'}`,
         `• สถานะ: บันทึกเป็นข้อมูล Link เรียบร้อยแล้ว`,
       ].join('\n');
 
@@ -1087,31 +1143,223 @@ async function handleIncomingTextEvent(params: {
   }
 
   // Case C: Standalone text message without URLs and not quoting a file
-  // Store as pending caption/recipient for the next file(s) from this sender (e.g. typing "Opor" then sending a PDF)
   const senderId = event.source?.userId || '';
+  const previewResolution = resolveRecipientsFromMessage(db, text);
+
+  // Check if the sender JUST uploaded one or more uncaptioned media files immediately before this text message (within 60s)
+  // (e.g., LINE sending media webhook first and text webhook right after, or user sending a file then typing the caption right after)
   if (senderId && text) {
-    pendingSenderCaptions.set(senderId, {
-      text,
-      messageId: message.id,
-      createdAtMs: Date.now(),
-      lastUsedAtMs: 0,
-      usedCount: 0,
-    });
+    const recentEvents = db
+      .prepare(
+        `SELECT id, message_type, processing_status
+         FROM line_webhook_events
+         WHERE sender_line_user_id = ?
+           AND id < ?
+           AND received_at >= datetime('now', '-60 seconds')
+         ORDER BY id DESC
+         LIMIT 10`
+      )
+      .all(senderId, eventPk) as Array<{
+      id: number;
+      message_type: string | null;
+      processing_status: string;
+    }>;
+
+    const uncaptionedFilesToUpdate: Array<{
+      id: number;
+      file_uuid: string;
+      original_name: string;
+      stored_filename: string;
+      relative_storage_path: string;
+      file_category: string;
+      file_size_bytes: number;
+      visibility: 'PRIVATE' | 'PUBLIC';
+    }> = [];
+
+    for (const ev of recentEvents) {
+      if (
+        ['file', 'image', 'video', 'audio'].includes(ev.message_type || '') &&
+        ev.processing_status === 'SUCCESS'
+      ) {
+        const fileRow = db
+          .prepare(
+            `SELECT id, file_uuid, original_name, stored_filename, relative_storage_path,
+                    file_category, file_size_bytes, visibility, attached_message, recipient_raw_text
+             FROM files
+             WHERE webhook_event_pk = ? AND status = 'ACTIVE'`
+          )
+          .get(ev.id) as
+          | {
+              id: number;
+              file_uuid: string;
+              original_name: string;
+              stored_filename: string;
+              relative_storage_path: string;
+              file_category: string;
+              file_size_bytes: number;
+              visibility: 'PRIVATE' | 'PUBLIC';
+              attached_message: string | null;
+              recipient_raw_text: string | null;
+            }
+          | undefined;
+
+        if (fileRow && fileRow.attached_message === null && fileRow.recipient_raw_text === null) {
+          uncaptionedFilesToUpdate.push(fileRow);
+        } else {
+          break;
+        }
+      } else {
+        break;
+      }
+    }
+
+    if (uncaptionedFilesToUpdate.length > 0) {
+      for (const targetFile of uncaptionedFilesToUpdate) {
+        let newRelativePath = targetFile.relative_storage_path;
+
+        if (
+          previewResolution.visibility === 'PRIVATE' &&
+          previewResolution.recipients.length > 0 &&
+          targetFile.visibility === 'PUBLIC'
+        ) {
+          const currentAbsPath = resolveSafeStoragePath(
+            appConfig.paths.storage,
+            targetFile.relative_storage_path
+          );
+          const primaryUserFolder = sanitizeUserFolderId(previewResolution.recipients[0].userId);
+          const userPrivateDir = resolveSafeStoragePath(
+            appConfig.paths.privateStorage,
+            primaryUserFolder
+          );
+          if (!fs.existsSync(userPrivateDir)) {
+            fs.mkdirSync(userPrivateDir, { recursive: true });
+          }
+          const newAbsPath = resolveSafeStoragePath(userPrivateDir, targetFile.stored_filename);
+          if (fs.existsSync(currentAbsPath) && currentAbsPath !== newAbsPath) {
+            fs.renameSync(currentAbsPath, newAbsPath);
+          }
+          newRelativePath = path.posix.join('private', primaryUserFolder, targetFile.stored_filename);
+        }
+
+        runInTransaction(db, () => {
+          db.prepare(
+            `UPDATE files
+             SET attached_message = ?,
+                 recipient_raw_text = ?,
+                 visibility = ?,
+                 relative_storage_path = ?
+             WHERE id = ?`
+          ).run(
+            previewResolution.attachedMessage,
+            previewResolution.rawText,
+            previewResolution.visibility,
+            newRelativePath,
+            targetFile.id
+          );
+
+          if (previewResolution.visibility === 'PRIVATE') {
+            db.prepare(`DELETE FROM file_recipients WHERE file_pk = ?`).run(targetFile.id);
+            const insertRec = db.prepare(
+              `INSERT INTO file_recipients (file_pk, user_pk, recipient_user_id, assigned_at)
+               VALUES (?, ?, ?, datetime('now'))`
+            );
+            for (const rec of previewResolution.recipients) {
+              insertRec.run(targetFile.id, rec.userPk, rec.userId);
+            }
+
+            createNotificationsForIncomingItem(db, {
+              itemType: 'FILE',
+              filePk: targetFile.id,
+              itemUuid: targetFile.file_uuid,
+              title: targetFile.original_name,
+              detailMessage: previewResolution.attachedMessage,
+              fileType: targetFile.file_category,
+              fileSizeBytes: targetFile.file_size_bytes,
+              visibility: 'PRIVATE',
+              recipients: previewResolution.recipients,
+              receivedAt: receivedAtIso,
+              eventBatchHint: message.id,
+            });
+          } else {
+            db.prepare(`UPDATE notifications SET detail_message = ? WHERE file_pk = ?`).run(
+              previewResolution.attachedMessage,
+              targetFile.id
+            );
+          }
+        });
+
+        broadcastRealtimeEvent({
+          type: 'FILE_UPDATED',
+          itemUuid: targetFile.file_uuid,
+          title: targetFile.original_name,
+          fileCategory: targetFile.file_category,
+          visibility: previewResolution.visibility,
+          recipientUserIds: previewResolution.recipients.map((r) => r.userId),
+          attachedMessage: previewResolution.attachedMessage,
+          fileSizeBytes: targetFile.file_size_bytes,
+          timestamp: receivedAtIso,
+        });
+      }
+
+      updateWebhookStatus(eventPk, 'DATABASE_COMMITTED');
+
+      const updatedNames = uncaptionedFilesToUpdate.map((f) => f.original_name).join(', ');
+      const postAttachReply = [
+        `✅ แนบข้อความและอัปเดตผู้รับให้ไฟล์ล่าสุดเรียบร้อยแล้ว`,
+        `• ไฟล์: ${updatedNames}`,
+        `• ผู้รับไฟล์: ${previewResolution.statusNote}`,
+        `• ข้อความที่ฝาก (Comment): ${previewResolution.attachedMessage || '- (ไม่มีข้อความฝาก)'}`,
+      ].join('\n');
+
+      const replyRes = await sendLineReply(event.replyToken, postAttachReply);
+      updateWebhookStatus(eventPk, 'SUCCESS', null, replyRes.status);
+      return;
+    }
   }
 
-  const previewResolution = resolveRecipientsFromMessage(db, text);
+  // Otherwise, store as pending caption/recipient for the next file(s) from this sender (e.g. typing "Opor" then sending a PDF)
+  if (senderId && text) {
+    const existing = pendingSenderCaptions.get(senderId);
+    const now = Date.now();
+    // If the sender sent two text messages in a row before sending the file (e.g. "Opor" then "ตั๋วเครื่องบิน"), combine them!
+    if (existing && existing.usedCount === 0 && now - existing.createdAtMs < 180 * 1000) {
+      const combinedText = existing.text.includes('/')
+        ? `${existing.text} ${text}`
+        : `${existing.text} / ${text}`;
+      pendingSenderCaptions.set(senderId, {
+        text: combinedText,
+        messageId: message.id,
+        createdAtMs: now,
+        lastUsedAtMs: 0,
+        usedCount: 0,
+      });
+    } else {
+      pendingSenderCaptions.set(senderId, {
+        text,
+        messageId: message.id,
+        createdAtMs: now,
+        lastUsedAtMs: 0,
+        usedCount: 0,
+      });
+    }
+  }
+
+  const effectivePendingText =
+    (senderId && pendingSenderCaptions.get(senderId)?.text) || text;
+  const effectiveResolution = resolveRecipientsFromMessage(db, effectivePendingText);
+
   const infoReply =
-    previewResolution.visibility === 'PRIVATE'
+    effectiveResolution.visibility === 'PRIVATE'
       ? [
           `📌 ตั้งค่าผู้รับสำหรับไฟล์ถัดไปเรียบร้อยแล้ว`,
-          `• ผู้รับไฟล์: ${previewResolution.statusNote}`,
-          `• ข้อความที่ฝาก (Comment): ${previewResolution.attachedMessage || '- (ไม่มีข้อความฝาก)'}`,
+          `• ผู้รับไฟล์: ${effectiveResolution.statusNote}`,
+          `• ข้อความที่ฝาก (Comment): ${effectiveResolution.attachedMessage || '- (ไม่มีข้อความฝาก)'}`,
           `• กรุณาส่งไฟล์ตามมาภายใน 3 นาที`,
         ].join('\n')
       : [
           `ℹ️ ตั้งค่าไฟล์ถัดไปเป็น Public (ส่วนกลาง)`,
-          `• ผู้รับไฟล์: ${previewResolution.statusNote}`,
-          `• ข้อความที่ฝาก (Comment): ${previewResolution.attachedMessage || '- (ไม่มีข้อความฝาก)'}`,
+          `• ผู้รับไฟล์: ${effectiveResolution.statusNote}`,
+          `• ข้อความที่ฝาก (Comment): ${effectiveResolution.attachedMessage || '- (ไม่มีข้อความฝาก)'}`,
           `• เคล็ดลับ: พิมพ์ "ชื่อผู้รับ / ข้อความฝาก" (เช่น Opor / ตั๋วเครื่องบิน) เพื่อส่งแบบ Private พร้อม Comment`,
         ].join('\n');
 

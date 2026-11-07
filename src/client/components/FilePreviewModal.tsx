@@ -76,22 +76,35 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({ file, onClos
               <h3 className="font-bold text-slate-900 truncate text-sm sm:text-base">
                 {file.originalName}
               </h3>
-              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 mt-0.5">
-                <span className="font-semibold text-slate-700">
-                  {file.fileCategory} (.{file.fileExtension})
+              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-[#C4C7C5] mt-1">
+                <div className="inline-flex items-center gap-1.5 font-semibold text-slate-800 dark:text-[#E3E3E3]">
+                  {file.uploaderPictureUrl ? (
+                    <img
+                      src={file.uploaderPictureUrl}
+                      alt={file.uploaderName || 'อาจารย์ผู้ส่งไฟล์ (LINE OA)'}
+                      className="w-4 h-4 rounded-full object-cover ring-1 ring-slate-300 dark:ring-[#444746]"
+                    />
+                  ) : (
+                    <span className="w-4 h-4 rounded-full bg-[#0B57D0] text-white text-[9px] font-bold inline-flex items-center justify-center">
+                      {(file.uploaderName || 'อ').charAt(0).toUpperCase()}
+                    </span>
+                  )}
+                  <span>{file.uploaderName || 'อาจารย์ผู้ส่งไฟล์ (LINE OA)'}</span>
+                </div>
+                <span>•</span>
+                <span>ส่งเมื่อ {formatDateTimeThai(file.receivedAt)}</span>
+                <span>•</span>
+                <span className="font-semibold text-slate-700 dark:text-[#E3E3E3]">
+                  {file.fileCategory} (.{file.fileExtension}) • {formatFileSize(file.fileSizeBytes)}
                 </span>
                 <span>•</span>
-                <span>{formatFileSize(file.fileSizeBytes)}</span>
-                <span className="hidden sm:inline">•</span>
-                <span className="hidden sm:inline">{formatDateTimeThai(file.receivedAt)}</span>
-                <span>•</span>
                 {file.visibility === 'PRIVATE' ? (
-                  <span className="inline-flex items-center gap-1 text-indigo-700 font-semibold">
+                  <span className="inline-flex items-center gap-1 text-indigo-700 dark:text-indigo-300 font-semibold">
                     <FolderLock className="w-3.5 h-3.5" />
                     Private{file.recipientUserIds ? ` (${file.recipientUserIds})` : ''}
                   </span>
                 ) : (
-                  <span className="inline-flex items-center gap-1 text-emerald-700 font-semibold">
+                  <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-300 font-semibold">
                     <Globe className="w-3.5 h-3.5" />
                     Public (ส่วนกลาง)
                   </span>
@@ -133,20 +146,20 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({ file, onClos
 
         {/* Attached Comment Banner if present */}
         {file.attachedMessage && (
-          <div className="px-4 sm:px-6 py-2.5 bg-amber-50 border-b border-amber-200 text-xs sm:text-sm text-amber-950 flex items-center gap-2">
+          <div className="px-4 sm:px-6 py-2.5 bg-amber-50 dark:bg-amber-950/70 border-b border-amber-200 dark:border-amber-700/80 text-xs sm:text-sm text-amber-950 dark:text-[#FDE68A] flex items-center gap-2">
             <span>💬</span>
             <div>
               <span className="font-bold">ข้อความที่ฝากถึงผู้รับ (Comment):</span>{' '}
-              <span>{file.attachedMessage}</span>
+              <span className="font-medium">{file.attachedMessage}</span>
             </div>
           </div>
         )}
 
         {/* iPad / iPhone / Smartphone Native PDF Helper Bar */}
         {file.fileCategory === 'PDF' && (
-          <div className="px-4 sm:px-6 py-2 bg-blue-50 border-b border-blue-200 flex flex-wrap items-center justify-between gap-2 text-xs text-blue-900">
+          <div className="px-4 sm:px-6 py-2 bg-blue-50 dark:bg-blue-950/70 border-b border-blue-200 dark:border-blue-800 flex flex-wrap items-center justify-between gap-2 text-xs text-blue-900 dark:text-blue-200">
             <div className="flex items-center gap-2">
-              <Smartphone className="w-4 h-4 text-blue-600 shrink-0" />
+              <Smartphone className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
               <span>
                 ใช้งานบน <strong>iPad / iPhone / มือถือ</strong>: กดปุ่มด้านขวาเพื่อเปิดดู PDF แบบเต็มจอ (เลื่อนอ่านได้ทุกหน้าและซูมได้ลื่นไหล)
               </span>

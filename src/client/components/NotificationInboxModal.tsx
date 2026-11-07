@@ -293,8 +293,8 @@ export const NotificationInboxModal: React.FC<NotificationInboxModalProps> = ({
                                 <span>• เวลา: {formatDateTimeThai(item.receivedAt)}</span>
                               </div>
                               {item.detailMessage && (
-                                <p className="text-xs text-slate-600 mt-1 bg-slate-50 px-2.5 py-1 rounded-md border border-slate-100">
-                                  ข้อความแนบ: {item.detailMessage}
+                                <p className="text-xs text-amber-950 dark:text-[#FDE68A] mt-1.5 bg-amber-50 dark:bg-amber-950/60 px-2.5 py-1.5 rounded-lg border border-amber-200 dark:border-amber-700/80 font-medium">
+                                  💬 ข้อความที่ฝาก: {item.detailMessage}
                                 </p>
                               )}
                             </div>

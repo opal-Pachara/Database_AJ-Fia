@@ -343,22 +343,55 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
     return 'ไดรฟ์ของฉัน (My Drive)';
   }, [activeTab]);
 
+  const renderUploaderAvatar = (
+    uploaderName?: string | null,
+    uploaderPictureUrl?: string | null,
+    sizeClass = 'w-6 h-6 text-[11px]'
+  ) => {
+    const displayName = (uploaderName || 'อาจารย์ผู้ส่งไฟล์ (LINE OA)').trim();
+    const initial = displayName.replace(/^อาจารย์/, 'อ').charAt(0).toUpperCase() || 'L';
+
+    if (uploaderPictureUrl) {
+      return (
+        <img
+          src={uploaderPictureUrl}
+          alt={displayName}
+          className={`${sizeClass} rounded-full object-cover ring-1 ring-slate-300 dark:ring-[#444746] shrink-0 bg-[#0B57D0] text-white`}
+          onError={(e) => {
+            (e.currentTarget as HTMLImageElement).style.display = 'none';
+          }}
+        />
+      );
+    }
+
+    return (
+      <div
+        className={`${sizeClass} rounded-full bg-gradient-to-br from-[#0B57D0] to-[#0842A0] dark:from-[#A8C7FA] dark:to-[#0B57D0] text-white dark:text-[#001D35] font-bold flex items-center justify-center shrink-0 shadow-2xs ring-1 ring-white/50 dark:ring-[#3C4043]`}
+        title={displayName}
+      >
+        {initial}
+      </div>
+    );
+  };
+
   /**
-   * Authentic Google Drive File Card (#F0F4F9 in Light / #1E1F20 in Dark, 16:10 preview box)
+   * Authentic Google Drive File Card (#F0F4F9 in Light / #1E1F20 in Dark, 16:10 preview box,
+   * prominent Comment callout, and Google Drive Footer with Uploader Avatar + Name + Timestamp)
    */
   const renderDriveFileCard = (f: FileItem) => {
     const previewUrl = `/api/files/${encodeURIComponent(f.fileUuid)}/preview`;
     const downloadUrl = `/api/files/${encodeURIComponent(f.fileUuid)}/download`;
     const canOpenPreview =
       f.isPreviewable || ['PDF', 'IMAGE', 'VIDEO', 'AUDIO'].includes(f.fileCategory);
+    const uploaderDisplay = f.uploaderName || 'อาจารย์ผู้ส่งไฟล์ (LINE OA)';
 
     return (
       <div
         key={f.fileUuid}
-        className="group bg-[#F0F4F9] dark:bg-[#1E1F20] hover:bg-[#E2E7EF] dark:hover:bg-[#282A2C] rounded-2xl p-3 transition-all duration-150 flex flex-col justify-between border border-transparent hover:border-slate-300/80 dark:hover:border-[#444746] shadow-2xs hover:shadow-md"
+        className="group bg-[#F0F4F9] dark:bg-[#1E1F20] hover:bg-[#E2E7EF] dark:hover:bg-[#282A2C] rounded-2xl p-3 transition-all duration-150 flex flex-col justify-between border border-slate-200/70 dark:border-[#3C4043]/80 hover:border-[#0B57D0]/40 dark:hover:border-[#A8C7FA]/40 shadow-2xs hover:shadow-md"
       >
         <div>
-          {/* Google Drive Card Top Row: File Type Icon + File Name + Extension Badge */}
+          {/* Google Drive Card Top Header: File Type Icon + File Name + Extension Badge */}
           <div className="flex items-center justify-between gap-2 pb-2.5 px-1">
             <div className="flex items-center gap-2.5 min-w-0">
               <div className="shrink-0">{renderCategoryIcon(f.fileCategory, 'w-4 h-4')}</div>
@@ -366,7 +399,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                 onClick={() => {
                   if (canOpenPreview) setPreviewFile(f);
                 }}
-                className={`text-xs sm:text-[13px] font-medium text-[#1F1F1F] dark:text-[#E3E3E3] truncate ${
+                className={`text-xs sm:text-[13px] font-semibold text-[#1F1F1F] dark:text-[#E3E3E3] truncate ${
                   canOpenPreview ? ' cursor-pointer hover:underline' : ''
                 }`}
                 title={f.originalName}
@@ -374,7 +407,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                 {f.originalName}
               </span>
             </div>
-            <span className="px-1.5 py-0.5 rounded-md bg-white/80 dark:bg-[#131314] text-[#444746] dark:text-[#C4C7C5] text-[10px] font-bold uppercase shrink-0 border border-slate-200/70 dark:border-[#3C4043]">
+            <span className="px-1.5 py-0.5 rounded-md bg-white dark:bg-[#131314] text-[#444746] dark:text-[#C4C7C5] text-[10px] font-bold uppercase shrink-0 border border-slate-200/80 dark:border-[#3C4043]">
               .{f.fileExtension}
             </span>
           </div>
@@ -402,14 +435,14 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                 <div className="w-12 h-12 rounded-full bg-rose-600/95 group-hover:bg-rose-500 group-hover:scale-110 transition flex items-center justify-center shadow-lg">
                   <Play className="w-6 h-6 text-white fill-white ml-0.5" />
                 </div>
-                <span className="text-[11px] font-medium text-slate-200 bg-black/60 px-2.5 py-0.5 rounded-full">
+                <span className="text-[11px] font-medium text-slate-100 bg-black/70 px-2.5 py-0.5 rounded-full">
                   คลิกเพื่อเล่นวิดีโอ ({formatFileSize(f.fileSizeBytes)})
                 </span>
               </div>
             ) : f.fileCategory === 'PDF' ? (
-              <div className="w-full h-full bg-slate-100/70 dark:bg-[#1B1B1B] flex flex-col items-center justify-center p-3">
+              <div className="w-full h-full bg-slate-100/80 dark:bg-[#18191A] flex flex-col items-center justify-center p-3">
                 {/* Simulated Google Drive PDF Document Page Preview */}
-                <div className="w-4/5 h-full bg-white dark:bg-[#282A2C] rounded-t-lg shadow-xs border border-slate-200/90 dark:border-[#3C4043] p-3 flex flex-col items-center justify-center space-y-2 group-hover:scale-[1.02] transition">
+                <div className="w-4/5 h-full bg-white dark:bg-[#242628] rounded-t-lg shadow-xs border border-slate-200/90 dark:border-[#3C4043] p-3 flex flex-col items-center justify-center space-y-2 group-hover:scale-[1.02] transition">
                   <div className="w-10 h-10 rounded-xl bg-red-50 dark:bg-red-950/60 text-[#EA4335] flex items-center justify-center border border-red-100 dark:border-red-900">
                     <FileText className="w-5 h-5" />
                   </div>
@@ -436,7 +469,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                 <div className="w-12 h-12 rounded-2xl bg-[#F0F4F9] dark:bg-[#282A2C] text-[#0B57D0] dark:text-[#A8C7FA] flex items-center justify-center border border-slate-200 dark:border-[#3C4043]">
                   {renderCategoryIcon(f.fileCategory, 'w-6 h-6')}
                 </div>
-                <span className="text-[11px] font-medium text-[#5F6368] dark:text-[#C4C7C5]">
+                <span className="text-[11px] font-medium text-[#444746] dark:text-[#C4C7C5]">
                   {f.fileCategory} • {formatFileSize(f.fileSizeBytes)}
                 </span>
               </div>
@@ -456,42 +489,51 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                 </span>
               )}
             </div>
+
+            {/* Bottom-Left File Size Pill inside Thumbnail */}
+            <div className="absolute bottom-2 left-2">
+              <span className="px-2 py-0.5 rounded-md bg-black/65 text-white text-[10px] font-semibold backdrop-blur-xs">
+                {formatFileSize(f.fileSizeBytes)}
+              </span>
+            </div>
           </div>
         </div>
 
-        {/* Card Metadata & Comment Footer */}
+        {/* Card Metadata, Prominent Attached Comment & Authentic Google Drive Uploader Footer */}
         <div className="pt-2.5 px-0.5 space-y-2">
-          <div className="flex items-center justify-between text-[11px] text-[#5F6368] dark:text-[#C4C7C5]">
-            <span className="font-semibold text-[#1F1F1F] dark:text-[#E3E3E3]">
-              {formatFileSize(f.fileSizeBytes)}
-            </span>
-            <span>{formatDateTimeThai(f.receivedAt)}</span>
-          </div>
-
           {f.visibility === 'PRIVATE' && f.recipientUserIds && (
-            <div className="text-[11px] text-[#0B57D0] dark:text-[#A8C7FA] bg-[#D3E3FD]/70 dark:bg-[#004A77]/50 px-2.5 py-1 rounded-lg font-medium truncate">
+            <div className="text-[11px] text-[#001D35] dark:text-[#C2E7FF] bg-[#C2E7FF]/80 dark:bg-[#004A77]/80 px-2.5 py-1 rounded-lg font-semibold truncate">
               🔒 แชร์เฉพาะ: {f.recipientUserIds}
             </div>
           )}
 
+          {/* Attached Message / Comment Box (Always crystal clear in Light & Dark Mode) */}
           {f.attachedMessage ? (
-            <div className="px-2.5 py-1.5 rounded-xl bg-white dark:bg-[#131314] border border-amber-200/90 dark:border-amber-800/70 text-xs text-[#1F1F1F] dark:text-[#E3E3E3] flex items-start gap-1.5 shadow-2xs">
+            <div className="px-2.5 py-2 rounded-xl bg-amber-50 dark:bg-amber-950/60 border border-amber-300 dark:border-amber-700/80 text-xs text-amber-950 dark:text-amber-100 flex items-start gap-2 shadow-2xs">
               <MessageSquare className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
-              <span className="line-clamp-2 break-words font-medium">{f.attachedMessage}</span>
+              <div className="min-w-0 flex-1">
+                <span className="font-bold text-[11px] text-amber-800 dark:text-amber-300 block">
+                  💬 ข้อความที่ฝาก:
+                </span>
+                <p className="line-clamp-2 break-words font-medium text-[#1F1F1F] dark:text-[#FDE68A]">
+                  {f.attachedMessage}
+                </p>
+              </div>
             </div>
           ) : (
-            <div className="text-[11px] text-[#5F6368]/70 dark:text-[#8E918F] italic">
-              ไม่มีข้อความฝาก (Comment)
+            <div className="px-2.5 py-1.5 rounded-xl bg-white/60 dark:bg-[#131314]/60 border border-slate-200/70 dark:border-[#3C4043] text-[11px] text-[#5F6368] dark:text-[#9AA0A6] flex items-center gap-1.5">
+              <MessageSquare className="w-3 h-3 shrink-0 opacity-60" />
+              <span className="truncate">ไม่มีข้อความที่ฝาก (Comment)</span>
             </div>
           )}
 
           {/* Action Buttons */}
-          <div className="pt-1 flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5">
             {canOpenPreview && (
               <button
                 type="button"
                 onClick={() => setPreviewFile(f)}
-                className="flex-1 inline-flex items-center justify-center gap-1.5 py-2 px-2.5 rounded-full bg-white dark:bg-[#131314] hover:bg-[#D3E3FD] dark:hover:bg-[#004A77] text-[#0B57D0] dark:text-[#A8C7FA] border border-slate-200/90 dark:border-[#3C4043] text-xs font-semibold transition cursor-pointer"
+                className="flex-1 inline-flex items-center justify-center gap-1.5 py-1.5 px-2.5 rounded-full bg-white dark:bg-[#131314] hover:bg-[#D3E3FD] dark:hover:bg-[#004A77] text-[#0B57D0] dark:text-[#A8C7FA] border border-slate-200/90 dark:border-[#3C4043] text-xs font-semibold transition cursor-pointer"
               >
                 {f.fileCategory === 'VIDEO' ? (
                   <>
@@ -508,11 +550,24 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
             )}
             <a
               href={downloadUrl}
-              className="flex-1 inline-flex items-center justify-center gap-1.5 py-2 px-2.5 rounded-full bg-[#0B57D0] hover:bg-[#0842A0] text-white text-xs font-semibold transition shadow-2xs"
+              className="flex-1 inline-flex items-center justify-center gap-1.5 py-1.5 px-2.5 rounded-full bg-[#0B57D0] hover:bg-[#0842A0] text-white text-xs font-semibold transition shadow-2xs"
             >
               <Download className="w-3.5 h-3.5" />
               <span>ดาวน์โหลด</span>
             </a>
+          </div>
+
+          {/* Authentic Google Drive Bottom Footer: Uploader Profile Avatar + Name + Sent Timestamp */}
+          <div className="pt-2 mt-1 border-t border-slate-200/90 dark:border-[#3C4043] flex items-center gap-2">
+            {renderUploaderAvatar(uploaderDisplay, f.uploaderPictureUrl, 'w-6 h-6 text-[11px]')}
+            <div className="min-w-0 flex-1 leading-tight">
+              <p className="text-[11px] font-semibold text-[#1F1F1F] dark:text-[#E3E3E3] truncate">
+                {uploaderDisplay}
+              </p>
+              <p className="text-[10px] text-[#5F6368] dark:text-[#9AA0A6] truncate">
+                อัปโหลดเมื่อ {formatDateTimeThai(f.receivedAt)}
+              </p>
+            </div>
           </div>
         </div>
       </div>
@@ -924,37 +979,55 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                   const canPreview =
                     lf.isPreviewable ||
                     ['PDF', 'IMAGE', 'VIDEO', 'AUDIO'].includes(lf.fileCategory);
+                  const uploaderDisplay = lf.uploaderName || 'อาจารย์ผู้ส่งไฟล์ (LINE OA)';
                   return (
                     <div
                       key={`latest-${lf.fileUuid}`}
                       onClick={() => {
                         if (canPreview) setPreviewFile(lf);
                       }}
-                      className={`p-2.5 sm:p-3 rounded-2xl bg-[#F0F4F9] dark:bg-[#1E1F20] hover:bg-[#E2E7EF] dark:hover:bg-[#282A2C] transition flex items-center justify-between gap-3 ${
+                      className={`p-3 rounded-2xl bg-[#F0F4F9] dark:bg-[#1E1F20] hover:bg-[#E2E7EF] dark:hover:bg-[#282A2C] border border-slate-200/70 dark:border-[#3C4043]/80 transition flex flex-col justify-between gap-2 ${
                         canPreview ? 'cursor-pointer' : ''
                       }`}
                     >
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <div className="w-9 h-9 rounded-xl bg-white dark:bg-[#131314] flex items-center justify-center shrink-0 shadow-2xs">
-                          {renderCategoryIcon(lf.fileCategory, 'w-5 h-5')}
+                      <div className="flex items-center justify-between gap-2.5">
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <div className="w-9 h-9 rounded-xl bg-white dark:bg-[#131314] flex items-center justify-center shrink-0 shadow-2xs border border-slate-200/60 dark:border-[#3C4043]">
+                            {renderCategoryIcon(lf.fileCategory, 'w-5 h-5')}
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-xs font-semibold text-[#1F1F1F] dark:text-[#E3E3E3] truncate">
+                              {lf.originalName}
+                            </p>
+                            <p className="text-[11px] text-[#5F6368] dark:text-[#C4C7C5] truncate">
+                              {lf.fileCategory} • {formatFileSize(lf.fileSizeBytes)}
+                            </p>
+                          </div>
                         </div>
-                        <div className="min-w-0">
-                          <p className="text-xs font-semibold text-[#1F1F1F] dark:text-[#E3E3E3] truncate">
-                            {lf.originalName}
-                          </p>
-                          <p className="text-[11px] text-[#5F6368] dark:text-[#C4C7C5] truncate">
-                            {lf.fileCategory} • {formatFileSize(lf.fileSizeBytes)}
-                          </p>
-                        </div>
+                        <a
+                          href={`/api/files/${encodeURIComponent(lf.fileUuid)}/download`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="p-2 rounded-full hover:bg-white dark:hover:bg-[#131314] text-[#0B57D0] dark:text-[#A8C7FA] transition shrink-0"
+                          title="ดาวน์โหลด"
+                        >
+                          <Download className="w-4 h-4" />
+                        </a>
                       </div>
-                      <a
-                        href={`/api/files/${encodeURIComponent(lf.fileUuid)}/download`}
-                        onClick={(e) => e.stopPropagation()}
-                        className="p-2 rounded-full hover:bg-white dark:hover:bg-[#131314] text-[#0B57D0] dark:text-[#A8C7FA] transition shrink-0"
-                        title="ดาวน์โหลด"
-                      >
-                        <Download className="w-4 h-4" />
-                      </a>
+
+                      {lf.attachedMessage && (
+                        <div className="px-2.5 py-1 rounded-lg bg-amber-50 dark:bg-amber-950/60 border border-amber-300 dark:border-amber-700/80 text-[11px] text-amber-950 dark:text-[#FDE68A] truncate font-medium">
+                          💬 {lf.attachedMessage}
+                        </div>
+                      )}
+
+                      <div className="pt-1.5 border-t border-slate-200/70 dark:border-[#3C4043] flex items-center gap-2 text-[10px] text-[#5F6368] dark:text-[#9AA0A6]">
+                        {renderUploaderAvatar(uploaderDisplay, lf.uploaderPictureUrl, 'w-4 h-4 text-[9px]')}
+                        <span className="font-semibold text-[#1F1F1F] dark:text-[#E3E3E3] truncate">
+                          {uploaderDisplay}
+                        </span>
+                        <span>•</span>
+                        <span className="truncate">{formatDateTimeThai(lf.receivedAt)}</span>
+                      </div>
                     </div>
                   );
                 })}
@@ -996,9 +1069,18 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                         >
                           {u.visibility === 'PRIVATE' ? 'Private (ส่วนตัว)' : 'Public (ส่วนกลาง)'}
                         </span>
-                        <span className="text-xs text-[#5F6368] dark:text-[#C4C7C5]">
-                          ได้รับเมื่อ: {formatDateTimeThai(u.receivedAt)}
-                        </span>
+                        <div className="inline-flex items-center gap-1.5 text-xs text-[#5F6368] dark:text-[#C4C7C5]">
+                          {renderUploaderAvatar(
+                            u.uploaderName || 'อาจารย์ผู้ส่งไฟล์ (LINE OA)',
+                            u.uploaderPictureUrl,
+                            'w-5 h-5 text-[10px]'
+                          )}
+                          <span className="font-semibold text-[#1F1F1F] dark:text-[#E3E3E3]">
+                            {u.uploaderName || 'อาจารย์ผู้ส่งไฟล์ (LINE OA)'}
+                          </span>
+                          <span>•</span>
+                          <span>ส่งเมื่อ {formatDateTimeThai(u.receivedAt)}</span>
+                        </div>
                       </div>
                       <a
                         href={u.url}
@@ -1010,7 +1092,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                         <ExternalLink className="w-3.5 h-3.5 shrink-0" />
                       </a>
                       {u.attachedMessage && (
-                        <p className="text-xs text-[#1F1F1F] dark:text-[#E3E3E3] bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-800 px-3 py-1.5 rounded-xl w-fit">
+                        <p className="text-xs text-amber-950 dark:text-[#FDE68A] bg-amber-50 dark:bg-amber-950/60 border border-amber-300 dark:border-amber-700/80 px-3 py-1.5 rounded-xl w-fit font-medium">
                           💬 ข้อความที่ฝาก: {u.attachedMessage}
                         </p>
                       )}
@@ -1082,13 +1164,14 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                 const canPreview =
                   f.isPreviewable ||
                   ['PDF', 'IMAGE', 'VIDEO', 'AUDIO'].includes(f.fileCategory);
+                const uploaderDisplay = f.uploaderName || 'อาจารย์ผู้ส่งไฟล์ (LINE OA)';
                 return (
                   <div
                     key={`mob-list-${f.fileUuid}`}
                     onClick={() => {
                       if (canPreview) setPreviewFile(f);
                     }}
-                    className="py-3 px-1 flex flex-col gap-2 active:bg-[#F0F4F9] dark:active:bg-[#1E1F20]"
+                    className="py-3.5 px-1 flex flex-col gap-2 active:bg-[#F0F4F9] dark:active:bg-[#1E1F20]"
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex items-start gap-2.5 min-w-0">
@@ -1099,10 +1182,19 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                           <p className="text-xs font-semibold text-[#1F1F1F] dark:text-[#E3E3E3] break-all">
                             {f.originalName}
                           </p>
-                          <div className="flex items-center gap-1.5 flex-wrap text-[11px] text-[#5F6368] dark:text-[#C4C7C5] mt-0.5">
-                            <span>{formatFileSize(f.fileSizeBytes)}</span>
+                          <div className="flex items-center gap-1.5 flex-wrap text-[11px] text-[#5F6368] dark:text-[#C4C7C5] mt-1">
+                            {renderUploaderAvatar(
+                              uploaderDisplay,
+                              f.uploaderPictureUrl,
+                              'w-4 h-4 text-[9px]'
+                            )}
+                            <span className="font-semibold text-[#1F1F1F] dark:text-[#E3E3E3]">
+                              {uploaderDisplay}
+                            </span>
                             <span>•</span>
                             <span>{formatDateTimeThai(f.receivedAt)}</span>
+                            <span>•</span>
+                            <span>{formatFileSize(f.fileSizeBytes)}</span>
                           </div>
                         </div>
                       </div>
@@ -1118,8 +1210,8 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                     </div>
 
                     {f.attachedMessage && (
-                      <div className="ml-11 px-2.5 py-1 rounded-xl bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-800 text-xs text-[#1F1F1F] dark:text-[#E3E3E3]">
-                        💬 {f.attachedMessage}
+                      <div className="ml-11 px-2.5 py-1.5 rounded-xl bg-amber-50 dark:bg-amber-950/60 border border-amber-300 dark:border-amber-700/80 text-xs text-amber-950 dark:text-[#FDE68A] font-medium">
+                        💬 ข้อความที่ฝาก: {f.attachedMessage}
                       </div>
                     )}
 
@@ -1165,10 +1257,10 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                 <thead>
                   <tr className="border-b border-slate-200 dark:border-[#3C4043] text-xs font-semibold text-[#444746] dark:text-[#C4C7C5]">
                     <th className="py-3 px-4">ชื่อไฟล์ (Name)</th>
-                    <th className="py-3 px-3">หมวดหมู่</th>
+                    <th className="py-3 px-3">ผู้อัปโหลด (Owner)</th>
                     <th className="py-3 px-3">การเข้าถึง / ผู้รับ</th>
                     <th className="py-3 px-3">ข้อความที่ฝาก (Comment)</th>
-                    <th className="py-3 px-3">วันที่ได้รับ</th>
+                    <th className="py-3 px-3">เวลาที่ส่ง</th>
                     <th className="py-3 px-3">ขนาดไฟล์</th>
                     <th className="py-3 px-4 text-right">การดำเนินการ</th>
                   </tr>
@@ -1178,6 +1270,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                     const canPreview =
                       f.isPreviewable ||
                       ['PDF', 'IMAGE', 'VIDEO', 'AUDIO'].includes(f.fileCategory);
+                    const uploaderDisplay = f.uploaderName || 'อาจารย์ผู้ส่งไฟล์ (LINE OA)';
                     return (
                       <tr
                         key={f.fileUuid}
@@ -1191,15 +1284,27 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                         <td className="py-3 px-4">
                           <div className="flex items-center gap-3">
                             <div className="shrink-0">{renderCategoryIcon(f.fileCategory)}</div>
-                            <span className="font-medium text-[#1F1F1F] dark:text-[#E3E3E3] break-all">
-                              {f.originalName}
-                            </span>
+                            <div>
+                              <span className="font-medium text-[#1F1F1F] dark:text-[#E3E3E3] break-all block">
+                                {f.originalName}
+                              </span>
+                              <span className="text-[11px] text-[#5F6368] dark:text-[#9AA0A6]">
+                                {f.fileCategory} (.{f.fileExtension})
+                              </span>
+                            </div>
                           </div>
                         </td>
                         <td className="py-3 px-3 whitespace-nowrap">
-                          <span className="px-2 py-0.5 rounded-md bg-[#F0F4F9] dark:bg-[#282A2C] text-[#444746] dark:text-[#C4C7C5] text-xs font-semibold">
-                            {f.fileCategory} (.{f.fileExtension})
-                          </span>
+                          <div className="inline-flex items-center gap-2">
+                            {renderUploaderAvatar(
+                              uploaderDisplay,
+                              f.uploaderPictureUrl,
+                              'w-6 h-6 text-[11px]'
+                            )}
+                            <span className="text-xs font-medium text-[#1F1F1F] dark:text-[#E3E3E3]">
+                              {uploaderDisplay}
+                            </span>
+                          </div>
                         </td>
                         <td className="py-3 px-3 whitespace-nowrap">
                           {f.visibility === 'PRIVATE' ? (
@@ -1223,7 +1328,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                         </td>
                         <td className="py-3 px-3 max-w-xs">
                           {f.attachedMessage ? (
-                            <div className="inline-flex items-start gap-1.5 px-2.5 py-1 rounded-xl bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-800 text-xs text-[#1F1F1F] dark:text-[#E3E3E3]">
+                            <div className="inline-flex items-start gap-1.5 px-2.5 py-1 rounded-xl bg-amber-50 dark:bg-amber-950/60 border border-amber-300 dark:border-amber-700/80 text-xs text-amber-950 dark:text-[#FDE68A] font-medium">
                               <span className="shrink-0">💬</span>
                               <span className="break-words">{f.attachedMessage}</span>
                             </div>

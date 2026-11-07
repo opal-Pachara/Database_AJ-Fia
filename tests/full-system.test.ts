@@ -103,9 +103,25 @@ async function main() {
     contentType: 'application/pdf',
     data: samplePdfBytes,
   });
+  mockContentStore.set('msg_file_sent_first_1', {
+    contentType: 'application/pdf',
+    data: samplePdfBytes,
+  });
 
   const mockLineServer = http.createServer((req, res) => {
     const url = req.url || '';
+    if (req.method === 'GET' && url.startsWith('/v2/bot/profile/')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          userId: 'U11111111111111111111111111111111',
+          displayName: 'อ.เฟีย (AJ Fia)',
+          pictureUrl: 'https://profile.line-scdn.net/mock-aj-fia-avatar.jpg',
+        })
+      );
+      return;
+    }
+
     if (req.method === 'GET' && url.startsWith('/v2/bot/message/') && url.endsWith('/content')) {
       const parts = url.split('/');
       const msgId = decodeURIComponent(parts[4]);
@@ -1191,6 +1207,89 @@ async function main() {
         assert.equal(bulkDeleteRes.data.deletedCount, 2);
 
         return 'Verified "Opor / Comment" slash syntax, Admin comment edit, and Multi-select Bulk Delete';
+      }
+    );
+
+    // =========================================================================
+    // TEST-14: FILE SENT FIRST THEN TEXT SENT AFTER (WITHOUT QUOTE-REPLY) + UPLOADER PROFILE
+    // =========================================================================
+    await runStep(
+      'TEST-14',
+      'Post-Upload Text Attachment & Uploader Profile Avatar/Name',
+      'ทดสอบส่งไฟล์ก่อนแล้วพิมพ์ข้อความตามหลัง (ไม่ต้องกด Quote-Reply) + ตรวจสอบรูปโปรไฟล์และชื่อผู้อัปโหลด',
+      async () => {
+        // 1. Teacher sends file FIRST (no caption yet)
+        const fileFirstPayload = {
+          destination: 'Ubot',
+          events: [
+            {
+              type: 'message',
+              webhookEventId: 'evt_post_attach_file_1',
+              timestamp: Date.now() + 4000,
+              replyToken: 'reply_post_attach_file_1',
+              source: {
+                type: 'user',
+                userId: 'U11111111111111111111111111111111',
+              },
+              message: {
+                id: 'msg_file_sent_first_1',
+                type: 'file',
+                fileName: 'Slide_Lecture5.pdf',
+                fileSize: samplePdfBytes.length,
+              },
+            },
+          ],
+        };
+        const signedFileFirst = signWebhookBody(fileFirstPayload);
+        const rFile = await adminClient.request('POST', '/api/line/webhook', signedFileFirst.raw, {
+          'Content-Type': 'application/json',
+          'x-line-signature': signedFileFirst.sig,
+        });
+        assert.equal(rFile.status, 200);
+
+        // 2. Teacher sends text message AFTER ("Opor สไลด์บทที่ 5 ส่งตามหลังไฟล์") without Quote-Reply
+        const textSecondPayload = {
+          destination: 'Ubot',
+          events: [
+            {
+              type: 'message',
+              webhookEventId: 'evt_post_attach_text_2',
+              timestamp: Date.now() + 5000,
+              replyToken: 'reply_post_attach_text_2',
+              source: {
+                type: 'user',
+                userId: 'U11111111111111111111111111111111',
+              },
+              message: {
+                id: 'msg_text_sent_after_2',
+                type: 'text',
+                text: 'Opor สไลด์บทที่ 5 ส่งตามหลังไฟล์',
+              },
+            },
+          ],
+        };
+        const signedTextSecond = signWebhookBody(textSecondPayload);
+        const rText = await adminClient.request('POST', '/api/line/webhook', signedTextSecond.raw, {
+          'Content-Type': 'application/json',
+          'x-line-signature': signedTextSecond.sig,
+        });
+        assert.equal(rText.status, 200);
+
+        // Verify Student 2 (Opor / 6501002) sees Slide_Lecture5.pdf as PRIVATE with attachedMessage & uploader profile!
+        const s2Files = await student2Client.request('GET', '/api/files?visibility=PRIVATE');
+        assert.equal(s2Files.status, 200);
+        const slideFile = s2Files.data.files.find(
+          (f: any) => f.originalName === 'Slide_Lecture5.pdf'
+        );
+        assert.ok(slideFile, 'Expected Slide_Lecture5.pdf to be moved to PRIVATE for Opor');
+        assert.equal(slideFile.attachedMessage, 'สไลด์บทที่ 5 ส่งตามหลังไฟล์');
+        assert.equal(slideFile.uploaderName, 'อ.เฟีย (AJ Fia)');
+        assert.equal(
+          slideFile.uploaderPictureUrl,
+          'https://profile.line-scdn.net/mock-aj-fia-avatar.jpg'
+        );
+
+        return 'Verified Post-Upload Text attachment without Quote-Reply, space separator syntax, and Uploader Profile metadata';
       }
     );
 

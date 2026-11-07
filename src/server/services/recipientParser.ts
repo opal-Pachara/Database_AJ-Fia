@@ -53,8 +53,11 @@ function splitRecipientAndCommentBySlash(trimmedMessage: string): {
   recipientPart: string;
   commentPart: string | null;
 } {
-  // Temporarily mask http:// and https:// so we don't split inside a URL scheme
-  const masked = trimmedMessage.replace(/https?:\/\//gi, (m) => '_'.repeat(m.length));
+  // Temporarily mask full URLs (https://...) and numeric dates/fractions (e.g. 1/2 or 07/11/2026)
+  // so we don't mistakenly split inside a URL path or date
+  const masked = trimmedMessage
+    .replace(/https?:\/\/[^\s]+/gi, (m) => '_'.repeat(m.length))
+    .replace(/\d+\/\d+(?:\/\d+)?/g, (m) => '_'.repeat(m.length));
   const slashIdx = masked.indexOf('/');
 
   if (slashIdx === -1) {
@@ -249,7 +252,7 @@ export function resolveRecipientsFromMessage(
     };
   }
 
-  // Case B: Message does NOT contain "/" -> Check if it's a recipient name ("Opor")
+  // Case B: Message does NOT contain "/" -> Check if it's an exact recipient name ("Opor")
   const matchedWithoutSlash = matchRecipientTokens(activeUsers, recipientPart);
   if (matchedWithoutSlash.length > 0) {
     const labelList = matchedWithoutSlash.map((r) =>
@@ -260,10 +263,78 @@ export function resolveRecipientsFromMessage(
     return {
       visibility: 'PRIVATE',
       recipients: matchedWithoutSlash,
-      attachedMessage: null, // No "/" was provided -> no comment
+      attachedMessage: null, // Only recipient name was provided -> no comment
       rawText: trimmed,
       statusNote: `Private (${labelList.join(', ')})`,
     };
+  }
+
+  // Case B2: Check if message uses newline (\n), pipe (|), colon (:), dash ( - ), or space after a known recipient name/alias
+  // e.g., "Opor ตั๋วเครื่องบิน", "Opor : ตั๋วเครื่องบิน", "Opor - ตั๋วเครื่องบิน", "Opor\nตั๋วเครื่องบิน"
+  const altSeparatorMatch = trimmed.match(/^([^\n|:]+?)(?:\s*[|:]\s*|\s+-\s+|\r?\n+)([\s\S]+)$/);
+  if (altSeparatorMatch) {
+    const candRec = altSeparatorMatch[1].trim();
+    const candComment = altSeparatorMatch[2].trim();
+    const matchedAlt = matchRecipientTokens(activeUsers, candRec);
+    if (matchedAlt.length > 0) {
+      const labelList = matchedAlt.map((r) =>
+        r.matchedAlias && r.matchedAlias.toLowerCase() !== r.userId.toLowerCase()
+          ? `${r.userId} ${r.fullName} (${r.matchedAlias})`
+          : `${r.userId} ${r.fullName}`
+      );
+      return {
+        visibility: 'PRIVATE',
+        recipients: matchedAlt,
+        attachedMessage: candComment || null,
+        rawText: trimmed,
+        statusNote: `Private (${labelList.join(', ')})`,
+      };
+    }
+  }
+
+  // Check if message starts with a known user alias / userId / fullName followed by whitespace + comment
+  const cleanedPrefixTarget = trimmed
+    .replace(/^@(?:to:)?/i, '')
+    .replace(/^(?:ฝากให้|ถึง|ส่งให้|สำหรับ)\s+/i, '')
+    .trim();
+
+  for (const u of activeUsers) {
+    const aliasList = u.line_aliases
+      .split(/[,;|]+/)
+      .map((a) => a.trim())
+      .filter(Boolean);
+    // Sort longer tokens first so full names match before shorter prefixes
+    const tokens = Array.from(
+      new Set([...aliasList, u.user_id.trim(), u.full_name.trim()])
+    )
+      .filter(Boolean)
+      .sort((a, b) => b.length - a.length);
+
+    for (const token of tokens) {
+      const prefixRegex = new RegExp(`^${escapeRegex(token)}(?:\\s+|\\s*[,:-]\\s+)([\\s\\S]+)$`, 'i');
+      const m = cleanedPrefixTarget.match(prefixRegex);
+      if (m && m[1] && m[1].trim().length > 0) {
+        const extractedComment = m[1].trim();
+        const label =
+          token.toLowerCase() !== u.user_id.toLowerCase()
+            ? `${u.user_id} ${u.full_name} (${token})`
+            : `${u.user_id} ${u.full_name}`;
+        return {
+          visibility: 'PRIVATE',
+          recipients: [
+            {
+              userPk: u.id,
+              userId: u.user_id,
+              fullName: u.full_name,
+              matchedAlias: token,
+            },
+          ],
+          attachedMessage: extractedComment,
+          rawText: trimmed,
+          statusNote: `Private (${label})`,
+        };
+      }
+    }
   }
 
   // Case C: Message has no "/" and does not match any user -> Public file with this message as Comment

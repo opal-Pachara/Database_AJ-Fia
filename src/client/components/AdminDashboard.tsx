@@ -1021,6 +1021,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                   {f.fileCategory} (.{f.fileExtension})
                                 </span>
                                 <span>{formatFileSize(f.fileSizeBytes)}</span>
+                                <span>• อัปโหลดโดย {f.uploaderName || 'อาจารย์ผู้ส่งไฟล์ (LINE OA)'}</span>
                                 <span>• {formatDateTimeThai(f.receivedAt)}</span>
                               </div>
                             </div>
@@ -1286,9 +1287,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           <td className="py-3 px-3 text-xs text-slate-600">
                             {formatFileSize(f.fileSizeBytes)}
                           </td>
-                          <td className="py-3 px-3 text-xs text-slate-600 whitespace-nowrap">
-                            {formatDateTimeThai(f.receivedAt)}
-                          </td>
+                            <td className="py-3 px-3 text-xs text-slate-600 whitespace-nowrap">
+                              <div className="flex items-center gap-1.5 font-semibold text-slate-800 mb-0.5">
+                                {f.uploaderPictureUrl ? (
+                                  <img
+                                    src={f.uploaderPictureUrl}
+                                    alt={f.uploaderName || 'อาจารย์ผู้ส่งไฟล์'}
+                                    className="w-4 h-4 rounded-full object-cover"
+                                  />
+                                ) : (
+                                  <span className="w-4 h-4 rounded-full bg-blue-600 text-white text-[9px] font-bold inline-flex items-center justify-center">
+                                    {(f.uploaderName || 'อ').charAt(0).toUpperCase()}
+                                  </span>
+                                )}
+                                <span>{f.uploaderName || 'อาจารย์ผู้ส่งไฟล์ (LINE OA)'}</span>
+                              </div>
+                              <div>{formatDateTimeThai(f.receivedAt)}</div>
+                            </td>
                           <td className="py-3 px-4 text-right whitespace-nowrap">
                             <div className="inline-flex items-center gap-1.5">
                               {canPreview && (

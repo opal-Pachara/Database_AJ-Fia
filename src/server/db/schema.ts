@@ -98,6 +98,9 @@ export function initializeSchema(db: DatabaseSync): void {
       sha256_checksum TEXT NOT NULL,
       attached_message TEXT,
       recipient_raw_text TEXT,
+      uploader_line_user_id TEXT,
+      uploader_name TEXT,
+      uploader_picture_url TEXT,
       visibility TEXT NOT NULL DEFAULT 'PUBLIC' CHECK (visibility IN ('PRIVATE', 'PUBLIC')),
       is_previewable INTEGER NOT NULL DEFAULT 0 CHECK (is_previewable IN (0, 1)),
       status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'DELETED')),
@@ -134,6 +137,9 @@ export function initializeSchema(db: DatabaseSync): void {
       line_message_id TEXT,
       url TEXT NOT NULL,
       attached_message TEXT,
+      uploader_line_user_id TEXT,
+      uploader_name TEXT,
+      uploader_picture_url TEXT,
       visibility TEXT NOT NULL DEFAULT 'PUBLIC' CHECK (visibility IN ('PRIVATE', 'PUBLIC')),
       status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'DELETED')),
       received_at TEXT NOT NULL,
@@ -242,6 +248,52 @@ export function initializeSchema(db: DatabaseSync): void {
   if (!userCols.some((c) => c.name === 'line_aliases')) {
     db.exec(`ALTER TABLE users ADD COLUMN line_aliases TEXT NOT NULL DEFAULT ''`);
   }
+
+  // Safe migration for existing databases: uploader profile columns on files & url_records
+  const fileCols = db.prepare(`PRAGMA table_info(files)`).all() as Array<{ name: string }>;
+  if (!fileCols.some((c) => c.name === 'uploader_line_user_id')) {
+    db.exec(`ALTER TABLE files ADD COLUMN uploader_line_user_id TEXT`);
+  }
+  if (!fileCols.some((c) => c.name === 'uploader_name')) {
+    db.exec(`ALTER TABLE files ADD COLUMN uploader_name TEXT`);
+  }
+  if (!fileCols.some((c) => c.name === 'uploader_picture_url')) {
+    db.exec(`ALTER TABLE files ADD COLUMN uploader_picture_url TEXT`);
+  }
+
+  const urlCols = db.prepare(`PRAGMA table_info(url_records)`).all() as Array<{ name: string }>;
+  if (!urlCols.some((c) => c.name === 'uploader_line_user_id')) {
+    db.exec(`ALTER TABLE url_records ADD COLUMN uploader_line_user_id TEXT`);
+  }
+  if (!urlCols.some((c) => c.name === 'uploader_name')) {
+    db.exec(`ALTER TABLE url_records ADD COLUMN uploader_name TEXT`);
+  }
+  if (!urlCols.some((c) => c.name === 'uploader_picture_url')) {
+    db.exec(`ALTER TABLE url_records ADD COLUMN uploader_picture_url TEXT`);
+  }
+
+  // Backfill uploader_line_user_id and uploader_name from line_webhook_events for existing records
+  db.exec(`
+    UPDATE files
+    SET uploader_line_user_id = (
+      SELECT e.sender_line_user_id FROM line_webhook_events e WHERE e.id = files.webhook_event_pk
+    )
+    WHERE uploader_line_user_id IS NULL AND webhook_event_pk IS NOT NULL;
+
+    UPDATE files
+    SET uploader_name = 'อาจารย์ผู้ส่งไฟล์ (LINE OA)'
+    WHERE uploader_name IS NULL OR uploader_name = '';
+
+    UPDATE url_records
+    SET uploader_line_user_id = (
+      SELECT e.sender_line_user_id FROM line_webhook_events e WHERE e.id = url_records.webhook_event_pk
+    )
+    WHERE uploader_line_user_id IS NULL AND webhook_event_pk IS NOT NULL;
+
+    UPDATE url_records
+    SET uploader_name = 'อาจารย์ผู้ส่งไฟล์ (LINE OA)'
+    WHERE uploader_name IS NULL OR uploader_name = '';
+  `);
 
   // Ensure existing VIDEO and AUDIO files are marked previewable
   db.exec(`UPDATE files SET is_previewable = 1 WHERE file_category IN ('PDF', 'IMAGE', 'VIDEO', 'AUDIO')`);

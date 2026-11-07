@@ -9,6 +9,8 @@ export interface RealtimeEventPayload {
   recipientUserIds?: string[];
   attachedMessage?: string | null;
   fileSizeBytes?: number | null;
+  uploaderName?: string | null;
+  uploaderPictureUrl?: string | null;
   timestamp: string;
 }
 
